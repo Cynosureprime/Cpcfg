@@ -245,7 +245,6 @@ pcfg-go comparison (rockyou.txt, same machine):
 | 1M guesses | **1.4s** | 5.1s | **3.6x** |
 | 10M guesses | **3.2s** | 8.6s | **2.7x** |
 
-Note: pcfg-go's `-n` (limit) flag has a bug that prevents output ([issue #5](https://github.com/cyclone-github/pcfg-go/issues/5)). Benchmarks use `head -N` instead.
 
 Key optimizations:
 - Double-buffered block I/O with SSE2 `findeol()`
