@@ -194,7 +194,11 @@ int omen_save(OmenTrainer *ot, const char *omen_dir) {
     char path[PCFG_MAXPATH];
     FILE *fp;
 
+#ifdef _WIN32
+    mkdir(omen_dir);
+#else
     mkdir(omen_dir, 0755);
+#endif
 
     /* config.txt */
     snprintf(path, sizeof(path), "%s/config.txt", omen_dir);

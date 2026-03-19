@@ -123,7 +123,11 @@ static int write_prob_file(const char *path, CountEntry *entries, int count, int
 
 /* ---- Helper: ensure directory exists ---- */
 static void ensure_dir(const char *path) {
+#ifdef _WIN32
+    mkdir(path);
+#else
     mkdir(path, 0755);
+#endif
 }
 
 /* ---- Save length-indexed counters ----
