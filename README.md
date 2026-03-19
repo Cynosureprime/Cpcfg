@@ -225,12 +225,26 @@ Guesses are produced in strict probability-descending order using a binary max-h
 
 ## Performance
 
-Benchmarks on rockyou.txt (14.3M passwords), macOS x86_64, 16 threads:
+### Training
+
+| Dataset | Passwords | Machine | Threads | Time | RSS |
+|---|---|---|---|---|---|
+| rockyou.txt | 14.3M | macOS x86_64 | 16 | **24s** | 14.9 GB |
+| BigBabyPass | 332M | Linux x86_64 (mmt) | 72 | **15 min** | 159 GB |
+
+pcfg-go comparison (rockyou.txt, same machine):
 
 | | Cpcfg | pcfg-go | Speedup |
 |---|---|---|---|
 | Training | 24s | 131s | **5.5x** |
-| Generation | 6.4M guesses/sec | — | — |
+
+### Generation
+
+| | Cpcfg | pcfg-go |
+|---|---|---|
+| 1M guesses | **1.4s** | >3 hours (0 output, [issue #5](https://github.com/cyclone-github/pcfg-go/issues/5)) |
+| 10M guesses | **3.2s** | — |
+| Throughput | 3.1M guesses/sec | — |
 
 Key optimizations:
 - Double-buffered block I/O with SSE2 `findeol()`
