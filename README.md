@@ -37,13 +37,13 @@ Train on a wordlist of cracked passwords:
 pcfg -t <wordlist> -g <grammar_dir> [options]
 ```
 
-The trained grammar is stored in the directory specified by `-g`.
+Training analyzes password structure and writes the resulting grammar to a directory tree at the path given by `-g`. This directory is created automatically and contains probability tables, OMEN Markov data, and training metadata (`config.ini`).
 
 **Options:**
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-t <file>` | Training password file (required, or `stdin` for standard input) | — |
-| `-g <dir>` | Grammar directory (required) | — |
+| `-g <grammar_dir>` | Output grammar directory (created by training) | — |
 | `-T <int>` | Max worker threads | auto |
 | `-S` | Save sensitive data (full emails, URLs) | off |
 | `-p` | Input lines prefixed with occurrence count | off |
@@ -67,19 +67,19 @@ cat cracked.txt | pcfg -t stdin -g /tmp/piped
 
 ### Generation
 
-Generate password guesses from a trained grammar:
+Generate password guesses from a previously trained grammar:
 
 ```sh
-pcfg -G -g <grammar> [options]
+pcfg -G -g <grammar_dir> [options]
 ```
 
-Guesses are written to stdout in probability-descending order.
+Reads the grammar directory created by a prior training run and writes guesses to stdout in probability-descending order. Passwords containing colons or non-printable characters are output in `$HEX[]` encoding.
 
 **Options:**
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-G` | Generation mode (required) | — |
-| `-g <path>` | Grammar path (required) | — |
+| `-g <grammar_dir>` | Grammar directory (created by prior `-t` training) | — |
 | `-n <int>` | Max guesses (0 = unlimited) | 0 |
 | `-b` | Skip OMEN/Markov guesses | off |
 | `-a` | Disable case mangling | off |
@@ -255,7 +255,7 @@ Key optimizations:
 
 ## License
 
-See individual source files for license terms.
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 

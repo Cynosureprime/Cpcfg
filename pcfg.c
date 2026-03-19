@@ -418,8 +418,8 @@ static void usage(const char *prog) {
         "pcfg v%s - Probabilistic Context-Free Grammar password generator\n"
         "\n"
         "Training:\n"
-        "  %s -t <wordlist> -g <grammar> [options]\n"
-        "    -g <path>   Grammar file path (required)\n"
+        "  %s -t <wordlist> -g <grammar_dir> [options]\n"
+        "    -g <dir>    Grammar directory (created by training, read by generation)\n"
         "    -S          Save sensitive data (emails, full URLs)\n"
         "    -p          Lines prefixed with occurrence count\n"
         "    -c <float>  PCFG vs OMEN coverage 0.0-1.0 (default 0.6)\n"
@@ -429,8 +429,8 @@ static void usage(const char *prog) {
         "    -T <int>    Max threads (default: auto)\n"
         "\n"
         "Generation:\n"
-        "  %s -G -g <grammar> [options]\n"
-        "    -g <path>   Grammar file path (required)\n"
+        "  %s -G -g <grammar_dir> [options]\n"
+        "    -g <dir>    Grammar directory (previously created by -t training)\n"
         "    -n <int>    Max number of guesses (0 = unlimited)\n"
         "    -b          Skip OMEN/Markov guesses\n"
         "    -a          No case mangling\n"
@@ -524,7 +524,7 @@ int main(int argc, char **argv) {
     }
 
     if (!grammardir) {
-        fprintf(stderr, "pcfg: -g <grammar> is required\n");
+        fprintf(stderr, "pcfg: -g <grammar_dir> is required\n");
         usage(argv[0]);
         return 1;
     }
