@@ -405,11 +405,19 @@ static int mkdirp(const char *path, mode_t mode) {
     for (p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
+#ifdef _WIN32
+            mkdir(tmp);
+#else
             mkdir(tmp, mode);
+#endif
             *p = '/';
         }
     }
+#ifdef _WIN32
+    return mkdir(tmp);
+#else
     return mkdir(tmp, mode);
+#endif
 }
 
 /* ---- Usage ---- */
