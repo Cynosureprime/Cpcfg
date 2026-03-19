@@ -107,10 +107,10 @@ Cpcfg is designed to work in a pipeline with mdxfind for password cracking.
 
 ```sh
 # Generate guesses and feed directly to mdxfind
-pcfg -G -g /tmp/mygrammar | mdxfind -h hashes.txt -f -
+pcfg -G -g /tmp/mygrammar | mdxfind -f hashes.txt stdin
 
 # With a guess limit
-pcfg -G -g /tmp/mygrammar -n 50000000 | mdxfind -h hashes.txt -f -
+pcfg -G -g /tmp/mygrammar -n 50000000 | mdxfind -f hashes.txt stdin
 ```
 
 ### Iterative cracking
@@ -119,36 +119,34 @@ Crack, retrain on new results, crack again:
 
 ```sh
 # Initial crack with a wordlist
-mdxfind -h hashes.txt -f wordlist.txt > cracked_round1.txt
+mdxfind -f hashes.txt wordlist.txt > cracked_round1.txt
 
-# Train grammar on cracked passwords
-pcfg -t cracked_round1.txt -g /tmp/round1
+# Extract passwords and train grammar
+getpass < cracked_round1.txt | pcfg -t stdin -g /tmp/round1
 
 # Generate guesses for round 2
-pcfg -G -g /tmp/round1 | mdxfind -h hashes.txt -f - > cracked_round2.txt
+pcfg -G -g /tmp/round1 | mdxfind -f hashes.txt stdin > cracked_round2.txt
 
-# Combine and retrain
-cat cracked_round1.txt cracked_round2.txt | sort -u > all_cracked.txt
-pcfg -t all_cracked.txt -g /tmp/combined
+# Combine results, extract passwords, retrain
+cat cracked_round1.txt cracked_round2.txt | getpass | sort -u | pcfg -t stdin -g /tmp/combined
 
 # Round 3 with improved model
-pcfg -G -g /tmp/combined | mdxfind -h hashes.txt -f - > cracked_round3.txt
+pcfg -G -g /tmp/combined | mdxfind -f hashes.txt stdin > cracked_round3.txt
 ```
 
-### Combining with procrule
+### Combining with mangling rules
 
-Use pcfg output as a wordlist for procrule to apply hashcat/JtR-compatible mangling rules:
+Stream pcfg guesses into mdxfind with rule-based mangling:
 
 ```sh
-# PCFG guesses as wordlist, procrule applies mangling rules, mdxfind cracks
+pcfg -G -g /tmp/mygrammar | mdxfind -f hashes.txt -r best64.rule stdin
+```
+
+Or save guesses first, then use procrule to apply rules (procrule reads the full wordlist before processing):
+
+```sh
 pcfg -G -g /tmp/mygrammar -n 10000000 > /tmp/pcfg_words.txt
-procrule -r best64.rule /tmp/pcfg_words.txt | mdxfind -h hashes.txt -f -
-```
-
-Or stream directly:
-
-```sh
-pcfg -G -g /tmp/mygrammar | procrule -r best64.rule stdin | mdxfind -h hashes.txt -f -
+procrule -r best64.rule /tmp/pcfg_words.txt | mdxfind -f hashes.txt stdin
 ```
 
 ### Training on $HEX[] encoded output
@@ -156,8 +154,8 @@ pcfg -G -g /tmp/mygrammar | procrule -r best64.rule stdin | mdxfind -h hashes.tx
 mdxfind outputs non-printable passwords in `$HEX[]` format. Cpcfg handles this natively — no preprocessing needed:
 
 ```sh
-mdxfind -h hashes.txt -f wordlist.txt > cracked.txt
-pcfg -t cracked.txt -g /tmp/mygrammar
+mdxfind -f hashes.txt wordlist.txt > cracked.txt
+getpass < cracked.txt | pcfg -t stdin -g /tmp/mygrammar
 ```
 
 ## Memory Usage

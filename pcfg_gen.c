@@ -25,6 +25,8 @@ typedef struct {
 
 static OutBuf outbuf;
 
+static const char hextab_lc[16] = "0123456789abcdef";
+
 static void flush_output(void) {
     if (outbuf.pos > 0) {
         fwrite(outbuf.buf, 1, outbuf.pos, stdout);
@@ -32,12 +34,42 @@ static void flush_output(void) {
     }
 }
 
+/* Check if password needs $HEX[] encoding on output.
+ * Triggers on: control chars, DEL, high-bit bytes, colon, literal "$HEX[" */
+static inline int needs_hex(const char *pass, int passlen) {
+    for (int i = 0; i < passlen; i++) {
+        if ((signed char)(pass[i] + 1) < '!')
+            return 1;
+        if (pass[i] == ':')
+            return 1;
+    }
+    if (passlen >= 5 && strncmp(pass, "$HEX[", 5) == 0)
+        return 1;
+    return 0;
+}
+
 static inline void emit_guess(const char *guess, int len) {
-    if (outbuf.pos + len + 1 >= OUTBUF_SIZE)
-        flush_output();
-    memcpy(outbuf.buf + outbuf.pos, guess, len);
-    outbuf.pos += len;
-    outbuf.buf[outbuf.pos++] = '\n';
+    if (needs_hex(guess, len)) {
+        /* $HEX[ + 2 chars per byte + ] + \n = 5 + len*2 + 2 */
+        int need = 5 + len * 2 + 2;
+        if (outbuf.pos + need >= OUTBUF_SIZE)
+            flush_output();
+        memcpy(outbuf.buf + outbuf.pos, "$HEX[", 5);
+        outbuf.pos += 5;
+        for (int i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)guess[i];
+            outbuf.buf[outbuf.pos++] = hextab_lc[(c >> 4) & 0xf];
+            outbuf.buf[outbuf.pos++] = hextab_lc[c & 0xf];
+        }
+        outbuf.buf[outbuf.pos++] = ']';
+        outbuf.buf[outbuf.pos++] = '\n';
+    } else {
+        if (outbuf.pos + len + 1 >= OUTBUF_SIZE)
+            flush_output();
+        memcpy(outbuf.buf + outbuf.pos, guess, len);
+        outbuf.pos += len;
+        outbuf.buf[outbuf.pos++] = '\n';
+    }
 }
 
 /* ---- Apply case mask to alpha string ---- */

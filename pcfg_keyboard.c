@@ -28,10 +28,6 @@ static struct {
 
 static int keyboard_init_done = 0;
 
-/* Layout names for debugging */
-static const char *layout_names[] = {
-    "qwerty", "jcuken", "qwertz", "azerty", "dvorak"
-};
 
 /* ---- Layout definitions ----
  * Each row is a string of chars at consecutive positions.

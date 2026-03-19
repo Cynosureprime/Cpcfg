@@ -112,12 +112,6 @@ static inline void set_section_str(Section *s, char *value, int vlen,
     s->type[i] = '\0';
 }
 
-static inline int fast_itoa(char *buf, int num) {
-    if (num < 10) { buf[0] = '0' + num; buf[1] = '\0'; return 1; }
-    if (num < 100) { buf[0] = '0' + num/10; buf[1] = '0' + num%10; buf[2] = '\0'; return 2; }
-    buf[0] = '0' + num/100; buf[1] = '0' + (num/10)%10; buf[2] = '0' + num%10; buf[3] = '\0';
-    return 3;
-}
 
 /* Build case mask for an alpha section */
 void build_case_mask(const char *alpha, int len, char *mask) {

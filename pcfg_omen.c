@@ -290,9 +290,9 @@ void omen_free(OmenTrainer *ot) {
         free(ctx);
         JSLN(pv, ot->contexts, idx);
     }
-    Word_t rc;
-    JSLFA(rc, ot->contexts);
-    (void)rc;
+    Word_t bytes;
+    JSLFA(bytes, ot->contexts);
+    (void)bytes;
     free(ot->alphabet);
     free(ot);
 }

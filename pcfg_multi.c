@@ -165,6 +165,7 @@ static int identify_multi(MultiWordTrie *mw, const char *s, int slen,
  */
 int multiword_parse(MultiWordTrie *mw, const char *alpha, int alen,
                     int *parts, int max_parts) {
+    (void)max_parts;
     if (!mw) return 0;
     if (alen < mw->min_len || alen > mw->max_len) return 0;
 

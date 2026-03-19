@@ -105,9 +105,9 @@ void lencounter_inc(LenCounters *lc, int len, const char *key) {
 }
 
 void counter_free(Counter *c) {
-    Word_t rc;
-    JSLFA(rc, *c);
-    (void)rc;
+    Word_t bytes;
+    JSLFA(bytes, *c);
+    (void)bytes;
     *c = NULL;
 }
 
@@ -120,9 +120,9 @@ void lencounter_free(LenCounters *lc) {
         counter_free(c);
         JLN(pv, *lc, idx);
     }
-    Word_t rc;
-    JLFA(rc, *lc);
-    (void)rc;
+    Word_t bytes;
+    JLFA(bytes, *lc);
+    (void)bytes;
     *lc = NULL;
 }
 
@@ -151,9 +151,9 @@ static void lencounter_merge(LenCounters *dst, LenCounters *src) {
         counter_merge(dc, sc);
         JLN(pv, *src, idx);
     }
-    Word_t rc;
-    JLFA(rc, *src);
-    (void)rc;
+    Word_t bytes;
+    JLFA(bytes, *src);
+    (void)bytes;
     *src = NULL;
 }
 
@@ -411,7 +411,6 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
     OmenTrainer *omen = omen_new(ctx->ngram_size, ctx->alphabet_size);
     Counter char_freq = NULL;
     int alphabet_built = 0;
-    int buffer_number = 0;
     char *decoded_main = malloc(PCFG_MAXLINE);
 
     GlobalMultiTrie = mwtrie;
@@ -456,8 +455,6 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
 
     while ((linecount = cacheline(fin, &readbuf, &readindex)) > 0) {
         total_lines += linecount;
-        buffer_number++;
-
         /*
          * Main thread iterates this buffer's lines for sequential work:
          *   - Multiword trie training (all buffers)
