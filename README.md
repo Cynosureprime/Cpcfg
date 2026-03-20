@@ -10,13 +10,21 @@ Cpcfg trains on cracked passwords to learn structural patterns (e.g., "6 letters
 
 ## Features
 
-- **8 password detectors**: keyboard walks (5 layouts), emails, websites, years, context-sensitive patterns, alpha runs (with multiword splitting), digit runs, special characters
-- **OMEN Markov integration**: n-gram based character-level probability model
-- **Multiword detection**: trie-based splitting of compound passwords (e.g., "helloworld" → "hello" + "world")
-- **Parallel training**: job-queue architecture with double-buffered I/O, adaptive thread scaling
+Cpcfg implements the full feature set of [pcfg-go](https://github.com/cyclone-github/pcfg-go), which itself extended the original [pcfg_cracker](https://github.com/lakiw/pcfg_cracker) by Matt Weir:
+
+- **8 password detectors** (from pcfg-go): keyboard walks (5 layouts), emails, websites, years, context-sensitive patterns, alpha runs with multiword splitting, digit runs, special characters
+- **OMEN Markov integration** (from pcfg-go): n-gram based character-level probability model
+- **Multiword detection** (from pcfg-go): trie-based splitting of compound passwords (e.g., "helloworld" → "hello" + "world")
+- **Priority queue generation** (from pcfg_cracker): guesses emitted in strict probability-descending order
+
+Cpcfg adds:
+
+- **Parallel training**: job-queue architecture with double-buffered I/O and adaptive thread scaling
+- **Parallel generation**: popper/worker pipeline with pre-allocated buffers
 - **Single-pass I/O**: no file rewinding, works with pipes
+- **UTF-8 support**: Unicode alpha/case detection for Latin Extended, Cyrillic, Greek, CJK, Arabic, Hebrew, Thai
+- **$HEX[] support**: decodes $HEX-encoded passwords in training, encodes non-printable output
 - **File format compatible** with pcfg-go: trained grammars are interchangeable
-- **$HEX[] support**: decodes $HEX-encoded passwords in training input
 - **Memory reporting**: RSS displayed at key phases
 
 ## Building
