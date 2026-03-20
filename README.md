@@ -223,25 +223,29 @@ Guesses are produced in strict probability-descending order using a binary max-h
 
 ## Performance
 
-### Training
+### Training (rockyou.txt, 14.3M passwords, same machine)
+
+| Tool | Language | Time | Speedup |
+|---|---|---|---|
+| **Cpcfg** | C | **24s** | — |
+| pcfg-go | Go | 131s | 5.5x |
+| pcfg_cracker | Python | 24 min | 60x |
+
+Larger datasets:
 
 | Dataset | Passwords | Machine | Threads | Time | RSS |
 |---|---|---|---|---|---|
 | rockyou.txt | 14.3M | macOS x86_64 | 16 | **24s** | 14.9 GB |
-| BigBabyPass | 332M | Linux x86_64 (mmt) | 72 | **15 min** | 159 GB |
+| BigBabyPass | 332M | Linux x86_64 | 72 | **15 min** | 159 GB |
 
-pcfg-go comparison (rockyou.txt, same machine):
+### Generation (1M guesses, same grammar, same machine)
 
-| | Cpcfg | pcfg-go | Speedup |
+| Tool | Language | Time | Speedup |
 |---|---|---|---|
-| Training | 24s | 131s | **5.5x** |
-
-### Generation
-
-| | Cpcfg | pcfg-go | Speedup |
-|---|---|---|---|
-| 1M guesses | **1.4s** | 5.1s | **3.6x** |
-| 10M guesses | **3.2s** | 8.6s | **2.7x** |
+| **Cpcfg** | C | **1.3s** | — |
+| pcfg-go | Go | 5.1s | 3.9x |
+| pcfg_cracker | Python | 28s | 22x |
+| compiled-pcfg | C | — | (broken config parser) |
 
 
 Key optimizations:
