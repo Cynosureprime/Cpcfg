@@ -17,12 +17,13 @@
 #include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <dirent.h>
 #include <inttypes.h>
 
 #include "pcfg.h"
 #include "yarn.h"
 
-#define VERSION "1.01"
+#define VERSION "1.02"
 
 /* ---- Memory usage reporting ---- */
 #ifdef MACOSX
@@ -438,6 +439,15 @@ static void usage(const char *prog) {
         "    -C <str>    Comments for config\n"
         "    -T <int>    Max threads (default: auto)\n"
         "\n"
+        "Merge:\n"
+        "  %s -M <grammar1> -M <grammar2> -g <output_dir>\n"
+        "\n"
+        "AHF (synthetic generation):\n"
+        "  %s -A -g <grammar_dir> [-n count]\n"
+        "\n"
+        "Info:\n"
+        "  %s -i -g <grammar_dir>\n"
+        "\n"
         "Generation:\n"
         "  %s -G -g <grammar_dir> [options]\n"
         "    -g <dir>    Grammar directory (previously created by -t training)\n"
@@ -446,7 +456,7 @@ static void usage(const char *prog) {
         "    -a          No case mangling\n"
         "    -d          Debug output instead of guesses\n"
         "    -T <int>    Max threads (default: auto)\n"
-        "\n", VERSION, prog, prog);
+        "\n", VERSION, prog, prog, prog, prog, prog);
 }
 
 /* ---- Main ---- */
@@ -469,14 +479,24 @@ int main(int argc, char **argv) {
     int max_threads = 0;
 
     int mode_gen = 0;
+    int mode_info = 0;
+    int mode_ahf = 0;
+    char *merge_dirs[2] = {NULL, NULL};
+    int n_merge = 0;
 
-    while ((opt = getopt(argc, argv, "t:g:r:GSwf:Fc:n:a:C:bdT:hV")) != -1) {
+    while ((opt = getopt(argc, argv, "t:g:r:GiASwf:Fc:n:a:C:M:bdT:hV")) != -1) {
         switch (opt) {
         case 't':
             infile = optarg;
             break;
         case 'G':
             mode_gen = 1;
+            break;
+        case 'i':
+            mode_info = 1;
+            break;
+        case 'A':
+            mode_ahf = 1;
             break;
         case 'g':
         case 'r':
@@ -493,6 +513,9 @@ int main(int argc, char **argv) {
             break;
         case 'F':
             tctx.filter_junk = 1;
+            break;
+        case 'M':
+            if (n_merge < 2) merge_dirs[n_merge++] = optarg;
             break;
         case 'p':
             tctx.weighted = 1;  /* -p is legacy alias for -w */
@@ -542,16 +565,101 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Info mode: -i -g <grammar_dir> */
+    if (mode_info && grammardir) {
+        /* Load grammar and print stats */
+        GenCtx ictx;
+        memset(&ictx, 0, sizeof(ictx));
+        if (pcfg_load(grammardir, &ictx) < 0) return 1;
+
+        printf("Grammar: %s\n", grammardir);
+        printf("Base structures: %d\n", ictx.nbases);
+
+        /* Count entries per type by scanning directories */
+        const char *dirs[] = {"Alpha","Digits","Other","Keyboard",
+                              "Capitalization","Years","Context",
+                              "Emails","Websites",NULL};
+        int64_t total_entries = 0;
+        for (int d = 0; dirs[d]; d++) {
+            char path[PCFG_MAXPATH];
+            snprintf(path, sizeof(path), "%s/%s", grammardir, dirs[d]);
+            DIR *dp = opendir(path);
+            if (!dp) continue;
+            int64_t dir_entries = 0;
+            struct dirent *ent;
+            while ((ent = readdir(dp)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                char fpath[PCFG_MAXPATH];
+                snprintf(fpath, sizeof(fpath), "%s/%s", path, ent->d_name);
+                FILE *fp = fopen(fpath, "r");
+                if (!fp) continue;
+                int64_t lines = 0;
+                char buf[4096];
+                while (fgets(buf, sizeof(buf), fp)) lines++;
+                fclose(fp);
+                dir_entries += lines;
+            }
+            closedir(dp);
+            if (dir_entries > 0)
+                printf("  %-16s %'" PRId64 " entries\n", dirs[d], dir_entries);
+            total_entries += dir_entries;
+        }
+        printf("Total entries: %'" PRId64 "\n", total_entries);
+
+        /* Top 20 base structures */
+        printf("\nTop 20 base structures:\n");
+        int top = ictx.nbases < 20 ? ictx.nbases : 20;
+        for (int i = 0; i < top; i++) {
+            printf("  %6.2f%%  ", ictx.bases[i].prob * 100.0);
+            for (int j = 0; j < ictx.bases[i].nreplace; j++)
+                printf("%s", ictx.bases[i].replacements[j]);
+            printf("\n");
+        }
+
+        /* Password length distribution from base structures */
+        printf("\nEstimated password length distribution (from top structures):\n");
+        int len_hist[64];
+        memset(len_hist, 0, sizeof(len_hist));
+        int counted = ictx.nbases < 1000 ? ictx.nbases : 1000;
+        for (int i = 0; i < counted; i++) {
+            int pwlen = 0;
+            for (int j = 0; j < ictx.bases[i].nreplace; j++) {
+                char *r = ictx.bases[i].replacements[j];
+                if (r[0] == 'M') continue;
+                int n = atoi(r + 1);
+                if (r[0] == 'C') continue;  /* case mask doesn't add length */
+                pwlen += n;
+            }
+            if (pwlen > 0 && pwlen < 64) len_hist[pwlen]++;
+        }
+        for (int i = 1; i < 32; i++) {
+            if (len_hist[i] > 0)
+                printf("  len %2d: %d structures\n", i, len_hist[i]);
+        }
+
+        return 0;
+    }
+
+    /* Merge mode: -M <dir1> -M <dir2> -g <output> */
+    if (n_merge == 2 && grammardir) {
+        mkdirp(grammardir, 0755);
+        return pcfg_merge(merge_dirs[0], merge_dirs[1], grammardir);
+    }
+    if (n_merge > 0 && n_merge < 2) {
+        fprintf(stderr, "pcfg: -M requires exactly two grammar directories\n");
+        return 1;
+    }
+
     if (!grammardir) {
         fprintf(stderr, "pcfg: -g <grammar_dir> is required\n");
         usage(argv[0]);
         return 1;
     }
 
-    /* Determine mode: -t = training, -G = generation */
+    /* Determine mode: -t = training, -G = generation, -A = AHF */
     int mode_train = (infile != NULL);
-    if (!mode_train && !mode_gen) {
-        fprintf(stderr, "pcfg: specify -t <wordlist> (train) or -G (generate)\n");
+    if (!mode_train && !mode_gen && !mode_ahf) {
+        fprintf(stderr, "pcfg: specify -t (train), -G (generate), or -A (AHF)\n");
         return 1;
     }
     if (mode_train && mode_gen) {
@@ -564,6 +672,12 @@ int main(int argc, char **argv) {
 
     /* Install signal handler */
     signal(SIGINT, sigint_handler);
+
+    /* AHF mode: -A -g <grammar> [-n count] */
+    if (mode_ahf && grammardir) {
+        int64_t ahf_count = gctx.guess_limit > 0 ? gctx.guess_limit : 1000000;
+        return pcfg_ahf_generate(grammardir, &gctx, ahf_count);
+    }
 
     if (mode_train) {
         tctx.filename = infile;

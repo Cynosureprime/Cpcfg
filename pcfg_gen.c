@@ -202,6 +202,10 @@ static void seed_queue(GenCtx *ctx) {
         if (bs->nreplace <= 0) continue;
         int valid = 1;
         for (int j = 0; j < bs->nreplace; j++) {
+            /* -b: skip structures containing Markov entries */
+            if (ctx->skip_brute && bs->replacements[j][0] == 'M') {
+                valid = 0; break;
+            }
             Word_t *pv;
             JSLG(pv, ctx->grammar, (uint8_t *)bs->replacements[j]);
             if (!pv) { valid = 0; break; }

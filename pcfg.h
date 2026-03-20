@@ -213,6 +213,7 @@ void lencounter_free(LenCounters *lc);
 /* pcfg_save.c - save/load grammar */
 int  pcfg_save(const char *outdir, TrainCtx *ctx);
 int  pcfg_load(const char *ruledir, GenCtx *ctx);
+int  pcfg_merge(const char *dir1, const char *dir2, const char *outdir);
 
 /* pcfg_queue.c - priority queue */
 void    pq_init(PQueue *pq, int initial_cap);
@@ -227,6 +228,9 @@ double  find_prob(GenCtx *ctx, PTNode *nodes, int nnodes, double base_prob);
 
 /* pcfg_gen.c - guess generation */
 int  pcfg_generate(const char *ruledir, GenCtx *ctx);
+
+/* pcfg_ahf.c - adaptive hybrid-fuzzing generation */
+int  pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count);
 
 /* Arena */
 void  arena_init(Arena *a, size_t block_size);

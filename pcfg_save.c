@@ -670,3 +670,132 @@ int pcfg_load(const char *ruledir, GenCtx *ctx) {
 
     return 0;
 }
+
+/* ==================================================================
+ * MODEL MERGE: Combine two grammar directories
+ * ================================================================== */
+
+/* Load a TSV file into a JudySL counter (value → count) */
+static void load_tsv_to_counter(const char *path, Counter *c) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+    char line[PCFG_MAXLINE];
+    while (fgets(line, sizeof(line), fp)) {
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) len--;
+        line[len] = '\0';
+        if (len <= 0) continue;
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        char *probstr = tab + 1;
+        int64_t count;
+        char *slash = strchr(probstr, '/');
+        if (slash) {
+            count = strtoll(probstr, NULL, 10);
+        } else {
+            /* Float format: approximate count as 1 */
+            count = 1;
+        }
+        Word_t *pv;
+        JSLI(pv, *c, (uint8_t *)line);
+        *pv += (Word_t)count;
+    }
+    fclose(fp);
+}
+
+/* Merge one directory of TSV files (e.g., Alpha/1.txt, Alpha/2.txt...) */
+static void merge_dir(const char *dir1, const char *dir2, const char *outdir,
+                      const char *subname, int admit_min) {
+    char path1[PCFG_MAXPATH], path2[PCFG_MAXPATH], pathout[PCFG_MAXPATH];
+    char fulldir[PCFG_MAXPATH];
+    snprintf(fulldir, sizeof(fulldir), "%s/%s", outdir, subname);
+    ensure_dir(fulldir);
+
+    /* Collect all .txt filenames from both dirs */
+    char filenames[512][64];
+    int nfiles = 0;
+
+    for (int d = 0; d < 2; d++) {
+        const char *base = (d == 0) ? dir1 : dir2;
+        char dirpath[PCFG_MAXPATH];
+        snprintf(dirpath, sizeof(dirpath), "%s/%s", base, subname);
+        DIR *dp = opendir(dirpath);
+        if (!dp) continue;
+        struct dirent *ent;
+        while ((ent = readdir(dp)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char *dot = strrchr(ent->d_name, '.');
+            if (!dot || strcmp(dot, ".txt") != 0) continue;
+            /* Check if already in list */
+            int found = 0;
+            for (int i = 0; i < nfiles; i++)
+                if (strcmp(filenames[i], ent->d_name) == 0) { found = 1; break; }
+            if (!found && nfiles < 512) {
+                strncpy(filenames[nfiles], ent->d_name, 63);
+                filenames[nfiles][63] = '\0';
+                nfiles++;
+            }
+        }
+        closedir(dp);
+    }
+
+    /* For each file, merge counters */
+    for (int i = 0; i < nfiles; i++) {
+        Counter c = NULL;
+        snprintf(path1, sizeof(path1), "%s/%s/%s", dir1, subname, filenames[i]);
+        snprintf(path2, sizeof(path2), "%s/%s/%s", dir2, subname, filenames[i]);
+        load_tsv_to_counter(path1, &c);
+        load_tsv_to_counter(path2, &c);
+        if (!c) continue;
+
+        CountEntry *entries;
+        int64_t total;
+        int count = collect_counter(c, &entries, &total, admit_min);
+        if (count > 0 && total > 0) {
+            snprintf(pathout, sizeof(pathout), "%s/%s/%s", outdir, subname, filenames[i]);
+            write_prob_file(pathout, entries, count, total);
+        }
+        free_entries(entries, count);
+        Word_t bytes;
+        JSLFA(bytes, c);
+        (void)bytes;
+    }
+}
+
+int pcfg_merge(const char *dir1, const char *dir2, const char *outdir) {
+    fprintf(stderr, "pcfg: merging \"%s\" + \"%s\" → \"%s\"\n", dir1, dir2, outdir);
+
+    const char *dirs[] = {
+        "Grammar", "Alpha", "Capitalization", "Digits", "Other",
+        "Keyboard", "Years", "Context", "Emails", "Websites", NULL
+    };
+
+    ensure_dir(outdir);
+    for (int i = 0; dirs[i]; i++)
+        merge_dir(dir1, dir2, outdir, dirs[i], 0);
+
+    /* Copy Omen from dir1 if it exists (don't merge OMEN data) */
+    char src[PCFG_MAXPATH], dst[PCFG_MAXPATH];
+    snprintf(dst, sizeof(dst), "%s/Omen", outdir);
+    ensure_dir(dst);
+
+    /* Copy config.ini from dir1 */
+    snprintf(src, sizeof(src), "%s/config.ini", dir1);
+    snprintf(dst, sizeof(dst), "%s/config.ini", outdir);
+    FILE *fin = fopen(src, "r");
+    if (fin) {
+        FILE *fout = fopen(dst, "w");
+        if (fout) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), fin)) > 0)
+                fwrite(buf, 1, n, fout);
+            fclose(fout);
+        }
+        fclose(fin);
+    }
+
+    fprintf(stderr, "pcfg: merge complete\n");
+    return 0;
+}

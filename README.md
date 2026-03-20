@@ -26,6 +26,10 @@ Cpcfg adds:
 - **Admission filter** (`-f`): removes rare tokens below a count threshold, reducing grammar size by 80%+ (inspired by [hashcat PCFG](https://github.com/matrix/hashcat/tree/pcfg_ahf_v1.0) by matrix)
 - **Weighted wordlists** (`-w`): input format `count:password` for frequency-aware training
 - **Junk filter** (`-F`): automatic removal of base64, hex hashes, JSON, and HTML from training input (inspired by hashcat PCFG)
+- **Grammar merge** (`-M`): combine two trained grammars by summing their counters (inspired by hashcat PCFG)
+- **AHF synthetic generation** (`-A`): generates passwords never seen in training using OMEN Markov chains (inspired by hashcat PCFG)
+- **Model info** (`-i`): display grammar statistics (structure count, entry distribution, top patterns)
+- **Skip brute** (`-b`): exclude Markov/OMEN entries during generation
 - **$HEX[] support**: decodes $HEX-encoded passwords in training, encodes non-printable output
 - **File format compatible** with pcfg-go: trained grammars are interchangeable
 - **Memory reporting**: RSS displayed at key phases
@@ -85,6 +89,15 @@ pcfg -t passwords.txt -g /tmp/mygrammar -T 4 -c 0.8 -n 3
 
 # Train from pipe — single-pass, no seeking required
 cat cracked.txt | pcfg -t stdin -g /tmp/piped
+
+# Merge two grammars (combine training from separate datasets)
+pcfg -M /tmp/round1_grammar -M /tmp/round2_grammar -g /tmp/combined_grammar
+
+# AHF: generate 1M synthetic passwords using Markov chains
+pcfg -A -g /tmp/rockyou_grammar -n 1000000
+
+# Display grammar statistics
+pcfg -i -g /tmp/rockyou_grammar
 ```
 
 ### Generation
@@ -149,8 +162,9 @@ getpass < cracked_round1.txt | pcfg -t stdin -g /tmp/round1
 # Generate guesses for round 2
 pcfg -G -g /tmp/round1 | mdxfind -f hashes.txt stdin > cracked_round2.txt
 
-# Combine results, extract passwords, retrain
-cat cracked_round1.txt cracked_round2.txt | getpass | sort -u | pcfg -t stdin -g /tmp/combined
+# Train round 2 results separately, then merge both grammars
+getpass < cracked_round2.txt | pcfg -t stdin -g /tmp/round2
+pcfg -M /tmp/round1 -M /tmp/round2 -g /tmp/combined
 
 # Round 3 with improved model
 pcfg -G -g /tmp/combined | mdxfind -f hashes.txt stdin > cracked_round3.txt
