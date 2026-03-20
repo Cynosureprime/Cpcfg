@@ -146,18 +146,13 @@ int are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
         if (pos == parent_pos) continue;
         if (child[pos].index == 0) continue;
 
-        /* Create virtual parent by decrementing this position */
-        PTNode *vparent = malloc(nnodes * sizeof(PTNode));
-        memcpy(vparent, child, nnodes * sizeof(PTNode));
-        vparent[pos].index--;
+        /* Temporarily decrement to compute virtual parent probability */
+        child[pos].index--;
+        double vprob = find_prob(ctx, child, nnodes, base_prob);
+        child[pos].index++;
 
-        double vprob = find_prob(ctx, vparent, nnodes, base_prob);
-        free(vparent);
-
-        /* Reject if virtual parent has lower probability (not explored yet) */
         if (vprob < parent_prob)
             return 0;
-        /* Reject if same probability but earlier position (tie-breaking) */
         if (vprob == parent_prob && pos < parent_pos)
             return 0;
     }

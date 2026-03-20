@@ -232,6 +232,16 @@ char *arena_strdup(Arena *a, const char *s);
 char *arena_strndup(Arena *a, const char *s, size_t n);
 void  arena_free(Arena *a);
 
+/* UTF-8 */
+int      utf8_decode(const char *s, int len, uint32_t *cp);
+int      utf8_encode(char *buf, uint32_t cp);
+int      utf8_cplen(const char *s, int bytelen);
+int      utf8_is_alpha(uint32_t cp);
+int      utf8_is_upper(uint32_t cp);
+int      utf8_is_digit(uint32_t cp);
+uint32_t utf8_to_lower(uint32_t cp);
+uint32_t utf8_to_upper(uint32_t cp);
+
 /* Utility */
 int  decode_hex(const char *hex, char *out, int hexlen);
 void format_prob(double prob, char *buf, int buflen);

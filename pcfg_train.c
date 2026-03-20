@@ -191,10 +191,17 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
 
         switch (s->type[0]) {
         case ST_ALPHA: {
+            /* UTF-8 aware lowering */
             char *lowered = ws->lowered;
-            for (int j = 0; j < vlen; j++)
-                lowered[j] = fast_lower((unsigned char)val[j]);
-            lowered[vlen] = '\0';
+            int li = 0, si = 0;
+            while (si < vlen && li < PCFG_MAXLINE - 4) {
+                uint32_t cp;
+                int n = utf8_decode(val + si, vlen - si, &cp);
+                if (n == 0) break;
+                li += utf8_encode(lowered + li, utf8_to_lower(cp));
+                si += n;
+            }
+            lowered[li] = '\0';
             lencounter_inc(&tctx->cnt_alpha, s->tnum, lowered);
             build_case_mask(val, vlen, ws->mask);
             lencounter_inc(&tctx->cnt_masks, s->tnum, ws->mask);

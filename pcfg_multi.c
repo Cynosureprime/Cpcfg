@@ -14,13 +14,7 @@
 
 #include "pcfg.h"
 
-/* Inline tolower for ASCII — avoids locale function call overhead */
-static inline unsigned char fast_lower(unsigned char c) {
-    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
-}
-static inline int fast_isalpha(unsigned char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
+/* Use UTF-8 functions from pcfg_utf8.c for classification */
 
 #define TRIE_CHILDREN 128   /* ASCII range */
 
@@ -76,24 +70,39 @@ void multiword_free(MultiWordTrie *mw) {
     free(mw);
 }
 
-/* Train: add word runs from a password to the trie */
+/* Train: add word runs from a password to the trie.
+ * Trie keys are lowered UTF-8 byte sequences.
+ * run_len counts codepoints for min/max length checks. */
 void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
     TrieNode *cur = mw->root;
-    int run_len = 0;
+    int run_len = 0;  /* codepoint count */
 
-    for (int i = 0; i <= pwlen; i++) {
-        unsigned char c = (i < pwlen) ? (unsigned char)pw[i] : 0;
+    int i = 0;
+    while (i <= pwlen) {
+        uint32_t cp = 0;
+        int cpn = 0;
+        if (i < pwlen) {
+            cpn = utf8_decode(pw + i, pwlen - i, &cp);
+            if (cpn == 0) { i++; continue; }
+        }
 
-        if (fast_isalpha(c)) {
-            c = fast_lower(c);
-            if (c < TRIE_CHILDREN) {
-                if (!cur->children[c])
-                    cur->children[c] = trie_new_node();
-                cur = cur->children[c];
+        if (i < pwlen && utf8_is_alpha(cp)) {
+            /* Insert lowered UTF-8 bytes into trie */
+            uint32_t lcp = utf8_to_lower(cp);
+            char enc[4];
+            int elen = utf8_encode(enc, lcp);
+            for (int b = 0; b < elen; b++) {
+                unsigned char c = (unsigned char)enc[b];
+                if (c < TRIE_CHILDREN) {
+                    if (!cur->children[c])
+                        cur->children[c] = trie_new_node();
+                    cur = cur->children[c];
+                }
             }
             run_len++;
+            i += cpn;
         } else {
-            /* End of letter run */
+            /* End of letter run (non-alpha or end of string) */
             if (run_len >= mw->min_len && run_len <= mw->max_len) {
                 if (!cur->has_count) {
                     cur->count = 1;
@@ -104,6 +113,7 @@ void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
             }
             cur = mw->root;
             run_len = 0;
+            if (i < pwlen) i += cpn; else i++;
         }
     }
 }
@@ -111,11 +121,21 @@ void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
 /* Get count for a word in the trie */
 static int trie_get_count(MultiWordTrie *mw, const char *word, int len) {
     TrieNode *cur = mw->root;
-    for (int i = 0; i < len; i++) {
-        unsigned char c = fast_lower((unsigned char)word[i]);
-        if (c >= TRIE_CHILDREN || !cur->children[c])
-            return 0;
-        cur = cur->children[c];
+    int i = 0;
+    while (i < len) {
+        uint32_t cp;
+        int n = utf8_decode(word + i, len - i, &cp);
+        if (n == 0) break;
+        uint32_t lcp = utf8_to_lower(cp);
+        char enc[4];
+        int elen = utf8_encode(enc, lcp);
+        for (int b = 0; b < elen; b++) {
+            unsigned char c = (unsigned char)enc[b];
+            if (c >= TRIE_CHILDREN || !cur->children[c])
+                return 0;
+            cur = cur->children[c];
+        }
+        i += n;
     }
     return cur->has_count ? cur->count : 0;
 }

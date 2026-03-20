@@ -113,13 +113,18 @@ static inline void set_section_str(Section *s, char *value, int vlen,
 }
 
 
-/* Build case mask for an alpha section */
-void build_case_mask(const char *alpha, int len, char *mask) {
-    for (int i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)alpha[i];
-        mask[i] = (c >= 'A' && c <= 'Z') ? 'U' : 'L';
+/* Build case mask for an alpha section (UTF-8 aware).
+ * Outputs one U/L per codepoint, not per byte. */
+void build_case_mask(const char *alpha, int bytelen, char *mask) {
+    int mi = 0, i = 0;
+    while (i < bytelen) {
+        uint32_t cp;
+        int n = utf8_decode(alpha + i, bytelen - i, &cp);
+        if (n == 0) break;
+        mask[mi++] = utf8_is_upper(cp) ? 'U' : 'L';
+        i += n;
     }
-    mask[len] = '\0';
+    mask[mi] = '\0';
 }
 
 /* Build base structure from sections.
@@ -393,47 +398,58 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
             set_section_str(&sects[nsects], &pw[start], i - start, "W", 0);
             nsects++;
         } else {
-            unsigned char c = (unsigned char)pw[i];
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            /* Classify using UTF-8 codepoints */
+            uint32_t cp;
+            int cpn = utf8_decode(pw + i, pwlen - i, &cp);
+            if (cpn == 0) { i++; continue; }
+
+            if (utf8_is_alpha(cp)) {
+                /* Alpha run: advance by full codepoints */
                 int start = i;
                 while (i < pwlen && tag[i] == TAG_NONE) {
-                    c = (unsigned char)pw[i];
-                    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) break;
-                    i++;
+                    int n = utf8_decode(pw + i, pwlen - i, &cp);
+                    if (n == 0 || !utf8_is_alpha(cp)) break;
+                    i += n;
                 }
                 int alen = i - start;
+                /* tnum = codepoint count for type string (A6 = 6 codepoints) */
+                int cpcount = utf8_cplen(pw + start, alen);
 
-                /* Try multiword split */
+                /* Try multiword split (byte-level, ASCII only for now) */
                 int parts[16];
                 int nparts = 0;
-                if (GlobalMultiTrie && alen >= 8)
+                if (GlobalMultiTrie && cpcount >= 8)
                     nparts = multiword_parse(GlobalMultiTrie, &pw[start], alen, parts, 16);
 
                 if (nparts > 1) {
                     int off = start;
                     for (int p = 0; p < nparts && nsects < maxsects - 1; p++) {
-                        set_section(&sects[nsects], &pw[off], parts[p], 'A', parts[p]);
+                        int pcp = utf8_cplen(pw + off, parts[p]);
+                        set_section(&sects[nsects], &pw[off], parts[p], 'A', pcp);
                         nsects++;
                         off += parts[p];
                     }
                 } else {
-                    set_section(&sects[nsects], &pw[start], alen, 'A', alen);
+                    set_section(&sects[nsects], &pw[start], alen, 'A', cpcount);
                     nsects++;
                 }
-            } else if (c >= '0' && c <= '9') {
+            } else if (utf8_is_digit(cp)) {
                 int start = i;
-                while (i < pwlen && tag[i] == TAG_NONE && pw[i] >= '0' && pw[i] <= '9') i++;
+                while (i < pwlen && tag[i] == TAG_NONE &&
+                       (unsigned char)pw[i] >= '0' && (unsigned char)pw[i] <= '9') i++;
                 set_section(&sects[nsects], &pw[start], i - start, 'D', i - start);
                 nsects++;
             } else {
+                /* Other: advance by full codepoints, stop at alpha or digit */
                 int start = i;
                 while (i < pwlen && tag[i] == TAG_NONE) {
-                    c = (unsigned char)pw[i];
-                    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) break;
-                    if (c >= '0' && c <= '9') break;
-                    i++;
+                    int n = utf8_decode(pw + i, pwlen - i, &cp);
+                    if (n == 0) { i++; continue; }
+                    if (utf8_is_alpha(cp) || utf8_is_digit(cp)) break;
+                    i += n;
                 }
-                set_section(&sects[nsects], &pw[start], i - start, 'O', i - start);
+                int ocp = utf8_cplen(pw + start, i - start);
+                set_section(&sects[nsects], &pw[start], i - start, 'O', ocp);
                 nsects++;
             }
         }

@@ -1,15 +1,15 @@
 /*
  * pcfg_gen.c - Parallel guess generation
  *
- * Pipeline: popper (1) → workers (N) → writer (1)
+ * Pipeline: popper (main thread) → workers (N threads)
  *
  * Popper: pops from priority queue, finds children, pushes PTItems
  *   to a work ring for expansion.
- * Workers: pull PTItems, recursively expand into password strings,
- *   accumulate in thread-local 1MB output buffers, flush to output ring.
- * Writer: pulls filled output buffers, writes to stdout.
+ * Workers: pull PTItems, expand into passwords in pre-allocated buffers,
+ *   flush directly to stdout under a single write lock.
  *
- * Ring buffers use yarn locks for synchronization.
+ * All per-worker buffers are pre-allocated. No malloc in hot paths.
+ * Guess count uses __sync atomic for -n limit enforcement.
  */
 
 #include <stdio.h>
@@ -18,44 +18,33 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "pcfg.h"
 #include "yarn.h"
 
-/* ---- Ring buffer sizes ---- */
-#define PT_RING_SIZE    1024    /* PTItems: popper → workers */
-#define OUT_RING_SIZE   64      /* output buffers: workers → writer */
+/* ---- Config ---- */
+#define PT_RING_SIZE    1024
 #define OUTBUF_SIZE     (1024 * 1024)
-
-/* ---- Output buffer for ring ---- */
-typedef struct {
-    char *buf;
-    int   pos;
-    int   cap;
-} OutBatch;
-
-/* ---- PT work ring ---- */
-static PTItem  *pt_ring;
-static int      pt_head, pt_tail;
-static lock    *pt_have;    /* count of items available */
-static lock    *pt_space;   /* count of slots free */
-
-/* ---- Output ring ---- */
-static OutBatch *out_ring;
-static int       out_head, out_tail;
-static lock     *out_have;
-static lock     *out_space;
 
 /* ---- Shared state ---- */
 static GenCtx       *Gen;
 static volatile int  gen_done;
-static int64_t       total_guesses_atomic;
-static lock         *guess_lock;
-static lock         *workers_alive;  /* count of active workers */
+static volatile int64_t guess_count;
+static int64_t       guess_limit_val;
+
+/* PT work ring: popper → workers */
+static PTItem  *pt_ring;
+static volatile int pt_head, pt_tail;
+static lock    *pt_have;
+static lock    *pt_space;
+
+/* Single write lock for stdout */
+static lock    *write_lock;
 
 static const char hextab_lc[16] = "0123456789abcdef";
 
-/* ---- $HEX[] output encoding ---- */
+/* ---- $HEX[] check ---- */
 static inline int needs_hex(const char *pass, int passlen) {
     for (int i = 0; i < passlen; i++) {
         if ((signed char)(pass[i] + 1) < '!')
@@ -68,104 +57,80 @@ static inline int needs_hex(const char *pass, int passlen) {
     return 0;
 }
 
-/* Forward declaration */
-static void signal_writer_done(void);
-
-/* ---- Per-worker output accumulator ---- */
+/* ---- Per-worker state (all pre-allocated) ---- */
 typedef struct {
-    char *buf;
-    int   pos;
-    int   cap;
+    char *outbuf;       /* OUTBUF_SIZE bytes for accumulated output */
+    int   outpos;
+    char *guessbuf;     /* PCFG_MAXLINE bytes for building guesses */
+    char *saved;        /* PCFG_MAXLINE bytes for case mask save/restore */
     int64_t count;
-} WorkerOut;
+} Worker;
 
-static inline void worker_emit(WorkerOut *wo, const char *guess, int len) {
+static void worker_flush(Worker *w) {
+    if (w->outpos > 0) {
+        possess(write_lock);
+        int remaining = w->outpos;
+        char *p = w->outbuf;
+        while (remaining > 0) {
+            ssize_t n = write(STDOUT_FILENO, p, remaining);
+            if (n <= 0) { gen_done = 1; break; }
+            p += n;
+            remaining -= n;
+        }
+        twist(write_lock, TO, 0);
+        w->outpos = 0;
+    }
+}
+
+static inline void worker_emit(Worker *w, const char *guess, int len) {
     if (needs_hex(guess, len)) {
         int need = 5 + len * 2 + 2;
-        if (wo->pos + need >= wo->cap) {
-            /* Flush to output ring */
-            possess(out_space);
-            wait_for(out_space, NOT_TO_BE, 0);
-            int slot = out_head % OUT_RING_SIZE;
-            out_ring[slot].buf = wo->buf;
-            out_ring[slot].pos = wo->pos;
-            out_head++;
-            twist(out_space, BY, -1);
-            possess(out_have);
-            twist(out_have, BY, +1);
-            /* Get a fresh buffer */
-            wo->buf = malloc(OUTBUF_SIZE);
-            wo->pos = 0;
-        }
-        memcpy(wo->buf + wo->pos, "$HEX[", 5);
-        wo->pos += 5;
+        if (w->outpos + need >= OUTBUF_SIZE)
+            worker_flush(w);
+        memcpy(w->outbuf + w->outpos, "$HEX[", 5);
+        w->outpos += 5;
         for (int i = 0; i < len; i++) {
             unsigned char c = (unsigned char)guess[i];
-            wo->buf[wo->pos++] = hextab_lc[(c >> 4) & 0xf];
-            wo->buf[wo->pos++] = hextab_lc[c & 0xf];
+            w->outbuf[w->outpos++] = hextab_lc[(c >> 4) & 0xf];
+            w->outbuf[w->outpos++] = hextab_lc[c & 0xf];
         }
-        wo->buf[wo->pos++] = ']';
-        wo->buf[wo->pos++] = '\n';
+        w->outbuf[w->outpos++] = ']';
+        w->outbuf[w->outpos++] = '\n';
     } else {
-        if (wo->pos + len + 1 >= wo->cap) {
-            possess(out_space);
-            wait_for(out_space, NOT_TO_BE, 0);
-            int slot = out_head % OUT_RING_SIZE;
-            out_ring[slot].buf = wo->buf;
-            out_ring[slot].pos = wo->pos;
-            out_head++;
-            twist(out_space, BY, -1);
-            possess(out_have);
-            twist(out_have, BY, +1);
-            wo->buf = malloc(OUTBUF_SIZE);
-            wo->pos = 0;
-        }
-        memcpy(wo->buf + wo->pos, guess, len);
-        wo->pos += len;
-        wo->buf[wo->pos++] = '\n';
+        if (w->outpos + len + 1 >= OUTBUF_SIZE)
+            worker_flush(w);
+        memcpy(w->outbuf + w->outpos, guess, len);
+        w->outpos += len;
+        w->outbuf[w->outpos++] = '\n';
     }
-    wo->count++;
+    w->count++;
+    if (guess_limit_val > 0 &&
+        __sync_add_and_fetch(&guess_count, 1) >= guess_limit_val)
+        gen_done = 1;
 }
 
-/* Check if generation limit reached (called periodically by workers) */
-static inline int limit_reached(void) {
-    if (!Gen || Gen->guess_limit <= 0) return 0;
-    return gen_done;
-}
-
-/* Flush remaining output from worker */
-static void worker_flush(WorkerOut *wo) {
-    if (wo->pos > 0) {
-        possess(out_space);
-        wait_for(out_space, NOT_TO_BE, 0);
-        int slot = out_head % OUT_RING_SIZE;
-        out_ring[slot].buf = wo->buf;
-        out_ring[slot].pos = wo->pos;
-        out_head++;
-        twist(out_space, BY, -1);
-        possess(out_have);
-        twist(out_have, BY, +1);
-        wo->buf = NULL;
-        wo->pos = 0;
+/* ---- Apply case mask (UTF-8) ---- */
+static int apply_case_mask(const char *alpha, int alpha_bytelen,
+                           const char *mask, char *out) {
+    int oi = 0, ai = 0, mi = 0;
+    while (ai < alpha_bytelen) {
+        uint32_t cp;
+        int n = utf8_decode(alpha + ai, alpha_bytelen - ai, &cp);
+        if (n == 0) break;
+        uint32_t mapped = (mask[mi] == 'U') ? utf8_to_upper(cp) : utf8_to_lower(cp);
+        oi += utf8_encode(out + oi, mapped);
+        ai += n;
+        mi++;
     }
-}
-
-/* ---- Apply case mask ---- */
-static inline void apply_case_mask(const char *alpha, const char *mask, int len,
-                                   char *out) {
-    for (int i = 0; i < len; i++) {
-        if (mask[i] == 'U')
-            out[i] = (alpha[i] >= 'a' && alpha[i] <= 'z') ? alpha[i] - 32 : alpha[i];
-        else
-            out[i] = (alpha[i] >= 'A' && alpha[i] <= 'Z') ? alpha[i] + 32 : alpha[i];
-    }
+    return oi;
 }
 
 /* ---- Recursive guess expansion ---- */
 static void expand_item(GenCtx *ctx, PTNode *nodes, int nnodes,
-                        int node_idx, char *buf, int bufpos, WorkerOut *wo) {
+                        int node_idx, char *buf, int bufpos, Worker *w) {
+    if (gen_done) return;
     if (node_idx >= nnodes) {
-        worker_emit(wo, buf, bufpos);
+        worker_emit(w, buf, bufpos);
         return;
     }
 
@@ -181,119 +146,33 @@ static void expand_item(GenCtx *ctx, PTNode *nodes, int nnodes,
     GrammarEntry *ge = &gel->entries[node->index];
 
     if (type_char == ST_CASE) {
-        for (int v = 0; v < ge->nvalues; v++) {
+        for (int v = 0; v < ge->nvalues && !gen_done; v++) {
             char *mask = ge->values[v];
             int mlen = strlen(mask);
-            if (mlen > bufpos) mlen = bufpos;
-            char saved[256];
-            int slen = mlen < 256 ? mlen : 255;
-            memcpy(saved, buf + bufpos - slen, slen);
-            apply_case_mask(saved, mask, slen, buf + bufpos - slen);
-            expand_item(ctx, nodes, nnodes, node_idx + 1, buf, bufpos, wo);
-            memcpy(buf + bufpos - slen, saved, slen);
+            int alpha_start = bufpos;
+            int cps = 0;
+            while (alpha_start > 0 && cps < mlen) {
+                alpha_start--;
+                while (alpha_start > 0 && ((unsigned char)buf[alpha_start] & 0xC0) == 0x80)
+                    alpha_start--;
+                cps++;
+            }
+            int alpha_bytelen = bufpos - alpha_start;
+            memcpy(w->saved, buf + alpha_start, alpha_bytelen);
+            int newlen = apply_case_mask(w->saved, alpha_bytelen, mask, buf + alpha_start);
+            expand_item(ctx, nodes, nnodes, node_idx + 1, buf, alpha_start + newlen, w);
+            memcpy(buf + alpha_start, w->saved, alpha_bytelen);
         }
     } else if (type_char == ST_MARKOV) {
-        /* Skip M entries for now */
         return;
     } else {
-        for (int v = 0; v < ge->nvalues; v++) {
+        for (int v = 0; v < ge->nvalues && !gen_done; v++) {
             int vlen = strlen(ge->values[v]);
             if (bufpos + vlen >= PCFG_MAXLINE) continue;
             memcpy(buf + bufpos, ge->values[v], vlen);
-            expand_item(ctx, nodes, nnodes, node_idx + 1, buf, bufpos + vlen, wo);
+            expand_item(ctx, nodes, nnodes, node_idx + 1, buf, bufpos + vlen, w);
         }
     }
-}
-
-/* ---- Worker thread ---- */
-static void gen_worker(void *arg) {
-    (void)arg;
-    char *buf = malloc(PCFG_MAXLINE);
-    WorkerOut wo;
-    wo.buf = malloc(OUTBUF_SIZE);
-    wo.pos = 0;
-    wo.cap = OUTBUF_SIZE;
-    wo.count = 0;
-
-    while (1) {
-        possess(pt_have);
-        wait_for(pt_have, NOT_TO_BE, 0);
-        int slot = pt_tail % PT_RING_SIZE;
-        PTItem item = pt_ring[slot];
-        pt_tail++;
-        twist(pt_have, BY, -1);
-
-        possess(pt_space);
-        twist(pt_space, BY, +1);
-
-        /* Check sentinel */
-        if (item.nnodes == -1)
-            break;
-
-        /* Expand into guesses */
-        expand_item(Gen, item.nodes, item.nnodes, 0, buf, 0, &wo);
-
-        free(item.nodes);
-    }
-
-    /* Flush remaining output */
-    worker_flush(&wo);
-
-    /* Add to total */
-    possess(guess_lock);
-    total_guesses_atomic += wo.count;
-    twist(guess_lock, TO, peek_lock(guess_lock));
-
-    /* If last worker, signal writer to stop */
-    possess(workers_alive);
-    long remaining = peek_lock(workers_alive) - 1;
-    if (remaining <= 0) {
-        twist(workers_alive, TO, 0);
-        signal_writer_done();
-    } else {
-        twist(workers_alive, TO, remaining);
-    }
-
-    if (wo.buf) free(wo.buf);
-    free(buf);
-}
-
-/* ---- Writer thread ---- */
-static void gen_writer(void *arg) {
-    (void)arg;
-    while (1) {
-        possess(out_have);
-        wait_for(out_have, NOT_TO_BE, 0);
-        int slot = out_tail % OUT_RING_SIZE;
-        OutBatch *ob = &out_ring[slot];
-        /* Sentinel: NULL buf means stop */
-        if (ob->buf == NULL) {
-            out_tail++;
-            twist(out_have, BY, -1);
-            break;
-        }
-        fwrite(ob->buf, 1, ob->pos, stdout);
-        free(ob->buf);
-        ob->buf = NULL;
-        out_tail++;
-        twist(out_have, BY, -1);
-
-        possess(out_space);
-        twist(out_space, BY, +1);
-    }
-}
-
-/* Send sentinel to writer */
-static void signal_writer_done(void) {
-    possess(out_space);
-    wait_for(out_space, NOT_TO_BE, 0);
-    int slot = out_head % OUT_RING_SIZE;
-    out_ring[slot].buf = NULL;
-    out_ring[slot].pos = 0;
-    out_head++;
-    twist(out_space, BY, -1);
-    possess(out_have);
-    twist(out_have, BY, +1);
 }
 
 /* ---- Debug print ---- */
@@ -318,11 +197,9 @@ static void debug_print_pt(GenCtx *ctx, PTItem *item) {
 /* ---- Seed queue ---- */
 static void seed_queue(GenCtx *ctx) {
     pq_init(&ctx->queue, ctx->nbases * 2);
-
     for (int i = 0; i < ctx->nbases; i++) {
         BaseStructure *bs = &ctx->bases[i];
         if (bs->nreplace <= 0) continue;
-
         int valid = 1;
         for (int j = 0; j < bs->nreplace; j++) {
             Word_t *pv;
@@ -332,27 +209,23 @@ static void seed_queue(GenCtx *ctx) {
             if (gel->nentries <= 0) { valid = 0; break; }
         }
         if (!valid) continue;
-
         PTNode *nodes = malloc(bs->nreplace * sizeof(PTNode));
         for (int j = 0; j < bs->nreplace; j++) {
             strncpy(nodes[j].type, bs->replacements[j], PCFG_MAXTYPE - 1);
             nodes[j].type[PCFG_MAXTYPE - 1] = '\0';
             nodes[j].index = 0;
         }
-
         PTItem item;
         item.base_prob = bs->prob;
         item.nodes = nodes;
         item.nnodes = bs->nreplace;
         item.prob = find_prob(ctx, nodes, bs->nreplace, bs->prob);
         item.seq = 0;
-
         if (item.prob > 0.0)
             pq_push(&ctx->queue, &item);
         else
             free(nodes);
     }
-
     fprintf(stderr, "pcfg: queue seeded with %d items\n", ctx->queue.size);
 }
 
@@ -364,7 +237,6 @@ static void add_case_mangling(BaseStructure *bases, int nbases) {
         for (int j = 0; j < bs->nreplace; j++)
             if (bs->replacements[j][0] == 'A') n_alpha++;
         if (n_alpha == 0) continue;
-
         int new_count = bs->nreplace + n_alpha;
         char **new_repl = malloc(new_count * sizeof(char *));
         int k = 0;
@@ -383,6 +255,31 @@ static void add_case_mangling(BaseStructure *bases, int nbases) {
     }
 }
 
+/* ---- Worker thread ---- */
+static void gen_worker(void *arg) {
+    Worker *w = (Worker *)arg;
+
+    while (1) {
+        possess(pt_have);
+        wait_for(pt_have, NOT_TO_BE, 0);
+        int slot = pt_tail % PT_RING_SIZE;
+        PTItem item = pt_ring[slot];
+        pt_tail++;
+        twist(pt_have, BY, -1);
+
+        possess(pt_space);
+        twist(pt_space, BY, +1);
+
+        if (item.nnodes == -1)  /* sentinel */
+            break;
+
+        expand_item(Gen, item.nodes, item.nnodes, 0, w->guessbuf, 0, w);
+        free(item.nodes);
+    }
+
+    worker_flush(w);
+}
+
 /* ---- Main generation ---- */
 int pcfg_generate(const char *grammardir, GenCtx *ctx) {
     if (pcfg_load(grammardir, ctx) < 0)
@@ -393,109 +290,100 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
 
     Gen = ctx;
     gen_done = 0;
-    total_guesses_atomic = 0;
+    guess_count = 0;
+    guess_limit_val = ctx->guess_limit;
 
     int nworkers = ctx->nthreads;
     if (nworkers < 1) nworkers = 1;
 
-    /* Single-threaded mode for small runs or debug */
+    /* Single-threaded path for debug or -T 1 */
     if (ctx->debug || nworkers == 1) {
         struct timespec t0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        int64_t total = 0, pt_count = 0;
-        static char buf[PCFG_MAXLINE];
-        WorkerOut wo;
-        wo.buf = malloc(OUTBUF_SIZE);
-        wo.pos = 0;
-        wo.cap = OUTBUF_SIZE;
-        wo.count = 0;
+        Worker w;
+        w.outbuf = malloc(OUTBUF_SIZE);
+        w.outpos = 0;
+        w.guessbuf = malloc(PCFG_MAXLINE);
+        w.saved = malloc(PCFG_MAXLINE);
+        w.count = 0;
 
         PTItem item;
         while (pq_pop(&ctx->queue, &item)) {
-            pt_count++;
             if (ctx->debug) debug_print_pt(ctx, &item);
-
-            expand_item(ctx, item.nodes, item.nnodes, 0, buf, 0, &wo);
-            total += wo.count;
-            wo.count = 0;
-
-            /* Flush output */
-            if (wo.pos > 0) {
-                fwrite(wo.buf, 1, wo.pos, stdout);
-                wo.pos = 0;
+            expand_item(ctx, item.nodes, item.nnodes, 0, w.guessbuf, 0, &w);
+            if (w.outpos > 0) {
+                write(STDOUT_FILENO, w.outbuf, w.outpos);
+                w.outpos = 0;
             }
-
             int nchildren;
             PTItem *children = find_children(ctx, &item, &nchildren);
             for (int i = 0; i < nchildren; i++)
                 pq_push(&ctx->queue, &children[i]);
             free(children);
             free(item.nodes);
-
-            if (ctx->guess_limit > 0 && total >= ctx->guess_limit)
+            if (ctx->guess_limit > 0 && w.count >= ctx->guess_limit)
                 break;
         }
-        if (wo.pos > 0)
-            fwrite(wo.buf, 1, wo.pos, stdout);
+        if (w.outpos > 0)
+            write(STDOUT_FILENO, w.outbuf, w.outpos);
 
         struct timespec tend;
         clock_gettime(CLOCK_MONOTONIC, &tend);
         double elapsed = (tend.tv_sec - t0.tv_sec) + (tend.tv_nsec - t0.tv_nsec) / 1e9;
         fprintf(stderr, "\rpcfg: done. %" PRId64 " guesses in %.2fs (%.1fM/s)\n",
-                total, elapsed, elapsed > 0 ? total / elapsed / 1e6 : 0.0);
+                w.count, elapsed, elapsed > 0 ? w.count / elapsed / 1e6 : 0.0);
+        free(w.outbuf); free(w.guessbuf); free(w.saved);
         pq_free(&ctx->queue);
         return 0;
     }
 
-    /* ---- Parallel pipeline ---- */
+    /* ---- Parallel path ---- */
     fprintf(stderr, "pcfg: generating with %d worker threads\n", nworkers);
 
-    /* Allocate rings */
+    /* Pre-allocate all worker state */
+    Worker *workers = malloc(nworkers * sizeof(Worker));
+    for (int i = 0; i < nworkers; i++) {
+        workers[i].outbuf = malloc(OUTBUF_SIZE);
+        workers[i].outpos = 0;
+        workers[i].guessbuf = malloc(PCFG_MAXLINE);
+        workers[i].saved = malloc(PCFG_MAXLINE);
+        workers[i].count = 0;
+    }
+
+    /* Pre-allocate work ring */
     pt_ring = calloc(PT_RING_SIZE, sizeof(PTItem));
     pt_head = pt_tail = 0;
     pt_have = new_lock(0);
     pt_space = new_lock(PT_RING_SIZE);
-
-    out_ring = calloc(OUT_RING_SIZE, sizeof(OutBatch));
-    out_head = out_tail = 0;
-    out_have = new_lock(0);
-    out_space = new_lock(OUT_RING_SIZE);
-
-    guess_lock = new_lock(0);
-    workers_alive = new_lock(nworkers);
+    write_lock = new_lock(0);
 
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
-    /* Launch writer */
-    launch(gen_writer, NULL);
-
     /* Launch workers */
     for (int i = 0; i < nworkers; i++)
-        launch(gen_worker, NULL);
+        launch(gen_worker, &workers[i]);
 
-    /* Popper: runs on main thread */
+    /* Popper: main thread */
     int64_t pt_count = 0;
-    PTItem item;
     struct timespec tlast = t0;
+    PTItem item;
 
-    while (pq_pop(&ctx->queue, &item)) {
+    while (!gen_done && pq_pop(&ctx->queue, &item)) {
         pt_count++;
 
-        /* Push item to worker ring */
+        /* Push to work ring */
         possess(pt_space);
         wait_for(pt_space, NOT_TO_BE, 0);
         int slot = pt_head % PT_RING_SIZE;
-        /* Copy nodes for the worker (worker will free) */
-        pt_ring[slot] = item;
+        pt_ring[slot] = item;  /* nodes pointer transferred to worker */
         pt_head++;
         twist(pt_space, BY, -1);
-
         possess(pt_have);
         twist(pt_have, BY, +1);
 
-        /* Generate children and push to queue */
+        /* Find children, push to queue */
         int nchildren;
         PTItem *children = find_children(ctx, &item, &nchildren);
         for (int i = 0; i < nchildren; i++)
@@ -503,11 +391,10 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
         free(children);
 
         /* Check limit */
-        if (ctx->guess_limit > 0) {
-            possess(guess_lock);
-            int64_t cur = total_guesses_atomic;
-            release(guess_lock);
-            if (cur >= ctx->guess_limit) break;
+        if (guess_limit_val > 0 &&
+            __sync_fetch_and_add(&guess_count, 0) >= guess_limit_val) {
+            gen_done = 1;
+            break;
         }
 
         /* Progress */
@@ -517,9 +404,7 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
             double elapsed = (tnow.tv_sec - tlast.tv_sec) +
                              (tnow.tv_nsec - tlast.tv_nsec) / 1e9;
             if (elapsed >= 2.0) {
-                possess(guess_lock);
-                int64_t cur = total_guesses_atomic;
-                release(guess_lock);
+                int64_t cur = __sync_fetch_and_add(&guess_count, 0);
                 double total_elapsed = (tnow.tv_sec - t0.tv_sec) +
                                        (tnow.tv_nsec - t0.tv_nsec) / 1e9;
                 fprintf(stderr, "\rpcfg: %" PRId64 " guesses (%" PRId64 " PTs) "
@@ -531,40 +416,42 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
         }
     }
 
-    /* Signal workers we're done — send sentinel per worker */
+    /* Send sentinel per worker */
     gen_done = 1;
     for (int i = 0; i < nworkers; i++) {
         possess(pt_space);
         wait_for(pt_space, NOT_TO_BE, 0);
         int slot = pt_head % PT_RING_SIZE;
         memset(&pt_ring[slot], 0, sizeof(PTItem));
-        pt_ring[slot].nnodes = -1;  /* sentinel */
+        pt_ring[slot].nnodes = -1;
         pt_head++;
         twist(pt_space, BY, -1);
         possess(pt_have);
         twist(pt_have, BY, +1);
     }
 
-    /* Workers exit on sentinel, last worker signals writer, writer exits.
-     * join_all() waits for all of them. */
     join_all();
 
     struct timespec tend;
     clock_gettime(CLOCK_MONOTONIC, &tend);
     double total_elapsed = (tend.tv_sec - t0.tv_sec) +
                            (tend.tv_nsec - t0.tv_nsec) / 1e9;
+    int64_t final_count = __sync_fetch_and_add(&guess_count, 0);
     fprintf(stderr, "\rpcfg: done. %" PRId64 " guesses in %.2fs (%.1fM/s)\n",
-            total_guesses_atomic, total_elapsed,
-            total_elapsed > 0 ? total_guesses_atomic / total_elapsed / 1e6 : 0.0);
+            final_count, total_elapsed,
+            total_elapsed > 0 ? final_count / total_elapsed / 1e6 : 0.0);
 
+    /* Cleanup */
+    for (int i = 0; i < nworkers; i++) {
+        free(workers[i].outbuf);
+        free(workers[i].guessbuf);
+        free(workers[i].saved);
+    }
+    free(workers);
     free(pt_ring);
-    free(out_ring);
     free_lock(pt_have);
     free_lock(pt_space);
-    free_lock(out_have);
-    free_lock(out_space);
-    free_lock(guess_lock);
-    free_lock(workers_alive);
+    free_lock(write_lock);
     pq_free(&ctx->queue);
     return 0;
 }
