@@ -263,6 +263,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
-- [pcfg-go](https://github.com/cyclone-github/pcfg-go) by cyclone — the reference implementation
+- [pcfg_cracker](https://github.com/lakiw/pcfg_cracker) by Matt Weir — the original PCFG password research toolkit
+- [pcfg-go](https://github.com/cyclone-github/pcfg-go) by cyclone — Go reimplementation
 - [yarn.c](http://www.zlib.net/) by Mark Adler — threading library
 - [Judy arrays](http://judy.sourceforge.net/) — high-performance associative arrays
