@@ -238,14 +238,15 @@ Larger datasets:
 | rockyou.txt | 14.3M | macOS x86_64 | 16 | **24s** | 14.9 GB |
 | BigBabyPass | 332M | Linux x86_64 | 72 | **15 min** | 159 GB |
 
-### Generation (1M guesses, same grammar, same machine)
+### Generation (same machine, macOS x86_64)
 
-| Tool | Language | Time | Speedup |
+| Guesses | Cpcfg | pcfg-go | Speedup |
 |---|---|---|---|
-| **Cpcfg** | C | **1.3s** | — |
-| pcfg-go | Go | 5.1s | 3.9x |
-| pcfg_cracker | Python | 28s | 22x |
-| compiled-pcfg | C | — | (broken config parser) |
+| 1M | **1.3s** | 5.1s | **3.9x** |
+| 50M | **2.6s** | 16.9s | **6.5x** |
+| 100M | **3.3s** | 28.7s | **8.7x** |
+
+pcfg_cracker (Python): 28s for 1M guesses (22x slower than Cpcfg).
 
 
 Key optimizations:
