@@ -44,7 +44,7 @@ LDFLAGS = -pthread $(LDEXTRA)
 LIBS = -lJudy -lpthread -lm
 
 OBJS = pcfg.o pcfg_parse.o pcfg_train.o pcfg_save.o pcfg_queue.o \
-       pcfg_gen.o pcfg_keyboard.o pcfg_multi.o pcfg_omen.o yarn.o
+       pcfg_gen.o pcfg_keyboard.o pcfg_multi.o pcfg_omen.o pcfg_utf8.o yarn.o
 
 pcfg: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
