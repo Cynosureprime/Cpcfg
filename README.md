@@ -23,6 +23,9 @@ Cpcfg adds:
 - **Parallel generation**: popper/worker pipeline with pre-allocated buffers
 - **Single-pass I/O**: no file rewinding, works with pipes
 - **UTF-8 support**: Unicode alpha/case detection for Latin Extended, Cyrillic, Greek, CJK, Arabic, Hebrew, Thai
+- **Admission filter** (`-f`): removes rare tokens below a count threshold, reducing grammar size by 80%+ (inspired by [hashcat PCFG](https://github.com/matrix/hashcat/tree/pcfg_ahf_v1.0) by matrix)
+- **Weighted wordlists** (`-w`): input format `count:password` for frequency-aware training
+- **Junk filter** (`-F`): automatic removal of base64, hex hashes, JSON, and HTML from training input (inspired by hashcat PCFG)
 - **$HEX[] support**: decodes $HEX-encoded passwords in training, encodes non-printable output
 - **File format compatible** with pcfg-go: trained grammars are interchangeable
 - **Memory reporting**: RSS displayed at key phases
@@ -53,8 +56,10 @@ Training analyzes password structure and writes the resulting grammar to a direc
 | `-t <file>` | Training password file (required, or `stdin` for standard input) | — |
 | `-g <grammar_dir>` | Output grammar directory (created by training) | — |
 | `-T <int>` | Max worker threads | auto |
+| `-f <int>` | Admission filter: skip tokens with count below threshold | 0 (off) |
+| `-w` | Weighted input: lines are `count:password` format | off |
+| `-F` | Filter junk lines (base64, hex hashes, JSON, HTML) | off |
 | `-S` | Save sensitive data (full emails, URLs) | off |
-| `-p` | Input lines prefixed with occurrence count | off |
 | `-c <float>` | PCFG vs OMEN coverage split (0.0–1.0) | 0.6 |
 | `-n <int>` | OMEN n-gram size (2–5) | 4 |
 | `-a <int>` | OMEN alphabet size | 100 |
@@ -65,6 +70,15 @@ Training analyzes password structure and writes the resulting grammar to a direc
 ```sh
 # Basic training
 pcfg -t rockyou.txt -g /tmp/rockyou_grammar
+
+# With admission filter (skip tokens seen fewer than 3 times — reduces grammar 80%+)
+pcfg -t rockyou.txt -g /tmp/rockyou_grammar -f 3
+
+# Filter junk lines from messy input (removes base64, hex hashes, JSON, HTML)
+getpass < cracked.txt | pcfg -t stdin -g /tmp/clean_grammar -F
+
+# Weighted input (count:password format, e.g. from frequency analysis)
+pcfg -t weighted_passwords.txt -g /tmp/weighted_grammar -w
 
 # Train with 4 threads and custom OMEN settings
 pcfg -t passwords.txt -g /tmp/mygrammar -T 4 -c 0.8 -n 3
@@ -276,5 +290,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 - [pcfg_cracker](https://github.com/lakiw/pcfg_cracker) by Matt Weir — the original PCFG password research toolkit
 - [pcfg-go](https://github.com/cyclone-github/pcfg-go) by cyclone — Go reimplementation
+- [hashcat PCFG](https://github.com/matrix/hashcat/tree/pcfg_ahf_v1.0) by matrix — admission filter and junk detection concepts
 - [yarn.c](http://www.zlib.net/) by Mark Adler — threading library
 - [Judy arrays](http://judy.sourceforge.net/) — high-performance associative arrays

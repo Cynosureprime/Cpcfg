@@ -428,8 +428,10 @@ static void usage(const char *prog) {
         "Training:\n"
         "  %s -t <wordlist> -g <grammar_dir> [options]\n"
         "    -g <dir>    Grammar directory (created by training, read by generation)\n"
+        "    -w          Weighted input: lines are count:password format\n"
+        "    -f <int>    Admission filter: min occurrence count (default 0=off)\n"
+        "    -F          Filter junk lines (base64, hex hashes, JSON)\n"
         "    -S          Save sensitive data (emails, full URLs)\n"
-        "    -p          Lines prefixed with occurrence count\n"
         "    -c <float>  PCFG vs OMEN coverage 0.0-1.0 (default 0.6)\n"
         "    -n <int>    OMEN n-gram size 2-5 (default 4)\n"
         "    -a <int>    Alphabet size for Markov (default 100)\n"
@@ -468,7 +470,7 @@ int main(int argc, char **argv) {
 
     int mode_gen = 0;
 
-    while ((opt = getopt(argc, argv, "t:g:r:GSpc:n:a:C:bdT:hV")) != -1) {
+    while ((opt = getopt(argc, argv, "t:g:r:GSwf:Fc:n:a:C:bdT:hV")) != -1) {
         switch (opt) {
         case 't':
             infile = optarg;
@@ -476,15 +478,24 @@ int main(int argc, char **argv) {
         case 'G':
             mode_gen = 1;
             break;
-        case 'g':  /* grammar file path */
-        case 'r':  /* undocumented alias for pcfg-go compat */
+        case 'g':
+        case 'r':
             grammardir = optarg;
             break;
         case 'S':
             tctx.save_sensitive = 1;
             break;
+        case 'w':
+            tctx.weighted = 1;
+            break;
+        case 'f':
+            tctx.admit_threshold = atoi(optarg);
+            break;
+        case 'F':
+            tctx.filter_junk = 1;
+            break;
         case 'p':
-            /* prefix counts - TODO */
+            tctx.weighted = 1;  /* -p is legacy alias for -w */
             break;
         case 'c':
             tctx.coverage = atof(optarg);

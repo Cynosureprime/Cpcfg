@@ -142,6 +142,9 @@ typedef struct {
     char *comments;             /* user comments */
     char *filename;             /* training filename */
     int max_threads;            /* 0 = auto */
+    int admit_threshold;        /* admission filter: min count (0=off, default 2) */
+    int weighted;               /* -w: input is count:password format */
+    int filter_junk;            /* -F: filter junk lines (base64, hex, JSON) */
 } TrainCtx;
 
 /* Grammar (for generation) - JudySL mapping type_string → GrammarEntryList* */

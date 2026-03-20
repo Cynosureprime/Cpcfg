@@ -27,6 +27,67 @@ static inline unsigned char fast_lower(unsigned char c) {
     return (c >= 'A' && c <= 'Z') ? c + 32 : c;
 }
 
+/* ---- Junk line detection ----
+ * Returns 1 if line looks like base64, hex hash, JSON, or other non-password junk.
+ */
+static int is_junk_line(const char *pw, int pwlen) {
+    if (pwlen < 4) return 0;
+
+    /* JSON fragment: starts with { or [ */
+    if (pw[0] == '{' || pw[0] == '[') return 1;
+
+    /* XML/HTML tag */
+    if (pw[0] == '<' && pwlen > 2 && ((pw[1] >= 'a' && pw[1] <= 'z') ||
+        (pw[1] >= 'A' && pw[1] <= 'Z') || pw[1] == '/' || pw[1] == '!'))
+        return 1;
+
+    /* Pure hex string (32+ chars, all hex): likely a hash */
+    if (pwlen >= 32) {
+        int all_hex = 1;
+        for (int i = 0; i < pwlen && all_hex; i++) {
+            unsigned char c = (unsigned char)pw[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                all_hex = 0;
+        }
+        if (all_hex) return 1;
+    }
+
+    /* Base64-only (40+ chars, only A-Za-z0-9+/=, ends with = or ==) */
+    if (pwlen >= 40) {
+        int all_b64 = 1;
+        for (int i = 0; i < pwlen && all_b64; i++) {
+            unsigned char c = (unsigned char)pw[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '='))
+                all_b64 = 0;
+        }
+        if (all_b64 && (pw[pwlen-1] == '=' || pw[pwlen-2] == '='))
+            return 1;
+    }
+
+    return 0;
+}
+
+/* ---- Parse weighted input: "count:password" → returns count, advances *pw past count: ---- */
+static int64_t parse_weight(char **pw, int *pwlen) {
+    char *p = *pw;
+    int len = *pwlen;
+
+    /* Scan for digits followed by : */
+    int i = 0;
+    while (i < len && p[i] >= '0' && p[i] <= '9') i++;
+    if (i == 0 || i >= len || p[i] != ':') return 1;  /* no weight found, default 1 */
+
+    int64_t count = 0;
+    for (int j = 0; j < i; j++)
+        count = count * 10 + (p[j] - '0');
+    if (count <= 0) count = 1;
+
+    *pw = p + i + 1;
+    *pwlen = len - i - 1;
+    return count;
+}
+
 #define TRAIN_MAXLINE    PCFG_MAXLINE
 #define TRAIN_CHUNK      (50*1024*1024)
 #define TRAIN_HALFCHUNK  (TRAIN_CHUNK/2)
@@ -79,6 +140,7 @@ static lock *FreeWaiting, *WorkWaiting;
 static ThreadCtx *WorkerCtx;
 static int ThreadCount;
 static int Maxt;
+static TrainCtx *GlobalTrainCtx;  /* for worker access to options */
 
 /* ---- JudySL counter operations ---- */
 
@@ -299,11 +361,17 @@ static void train_worker(void *arg) {
             char *pw = &buf[ridx[i].offset];
             int pwlen = ridx[i].len;
             if (pwlen <= 0 || pwlen >= PCFG_MAXLINE - 64) continue;
+            /* Weighted: skip count: prefix */
+            if (GlobalTrainCtx->weighted)
+                (void)parse_weight(&pw, &pwlen);
             if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
                 int dlen = decode_hex(pw + 5, ws->decoded, pwlen - 5);
                 pw = ws->decoded; pwlen = dlen;
             }
-            if (pwlen > 0) train_password_tl(pw, pwlen, tctx, ws);
+            if (pwlen <= 0) continue;
+            /* Junk filter */
+            if (GlobalTrainCtx->filter_junk && is_junk_line(pw, pwlen)) continue;
+            train_password_tl(pw, pwlen, tctx, ws);
         }
 
         lock *buflock = (buf == Readbuf) ? ReadBuf0 : ReadBuf1;
@@ -411,6 +479,7 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
         }
     }
 
+    GlobalTrainCtx = ctx;
     fprintf(stderr, "pcfg: max %d threads, %d lines/job\n", Maxt, LINES_PER_JOB);
 
     /* Sequential state: multiword trie + OMEN (run on main thread) */
@@ -477,6 +546,12 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
             int pwlen = readindex[li].len;
             if (pwlen <= 0 || pwlen >= TRAIN_MAXLINE - 64) continue;
 
+            /* Weighted input: extract count prefix */
+            /* (weight is used for multiword/omen on main thread;
+               workers see each line once regardless) */
+            if (ctx->weighted)
+                (void)parse_weight(&pw, &pwlen);
+
             /* $HEX[] decode */
             if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
                 int dlen = decode_hex(pw + 5, decoded_main, pwlen - 5);
@@ -484,6 +559,9 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
                 pwlen = dlen;
             }
             if (pwlen <= 0) continue;
+
+            /* Junk filter */
+            if (ctx->filter_junk && is_junk_line(pw, pwlen)) continue;
 
             /* Multiword trie: always */
             multiword_train(mwtrie, pw, pwlen);

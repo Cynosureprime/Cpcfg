@@ -44,8 +44,10 @@ static int cmp_count_desc(const void *a, const void *b) {
     return strcmp(ca->key, cb->key);
 }
 
-/* ---- Collect counter entries into sorted array ---- */
-static int collect_counter(Counter c, CountEntry **out, int64_t *total_out) {
+/* ---- Collect counter entries into sorted array ----
+ * admit_min: skip entries with count < admit_min (0 = keep all)
+ */
+static int collect_counter(Counter c, CountEntry **out, int64_t *total_out, int admit_min) {
     int count = 0, cap = 1024;
     CountEntry *entries = malloc(cap * sizeof(CountEntry));
     if (!entries) return 0;
@@ -62,9 +64,14 @@ static int collect_counter(Counter c, CountEntry **out, int64_t *total_out) {
             entries = realloc(entries, cap * sizeof(CountEntry));
             if (!entries) return 0;
         }
+        int64_t val = (int64_t)*pv;
+        if (admit_min > 0 && val < admit_min) {
+            JSLN(pv, c, idx);
+            continue;
+        }
         entries[count].key = strdup((char *)idx);
-        entries[count].count = (int64_t)*pv;
-        total += entries[count].count;
+        entries[count].count = val;
+        total += val;
         count++;
         JSLN(pv, c, idx);
     }
@@ -136,7 +143,7 @@ static void ensure_dir(const char *path) {
  * Returns list of filenames written (for config.ini).
  */
 static int save_len_counters(const char *subdir, LenCounters lc,
-                             int *lens, int *nlens) {
+                             int *lens, int *nlens, int admit_min) {
     ensure_dir(subdir);
 
     Word_t idx = 0;
@@ -150,7 +157,7 @@ static int save_len_counters(const char *subdir, LenCounters lc,
 
         CountEntry *entries;
         int64_t total;
-        int count = collect_counter(c, &entries, &total);
+        int count = collect_counter(c, &entries, &total, admit_min);
         if (count > 0 && total > 0) {
             char path[PCFG_MAXPATH];
             snprintf(path, sizeof(path), "%s/%d.txt", subdir, len);
@@ -176,7 +183,7 @@ static int save_flat_counter(const char *subdir, const char *filename,
 
     CountEntry *entries;
     int64_t total;
-    int count = collect_counter(c, &entries, &total);
+    int count = collect_counter(c, &entries, &total, 0);
     if (count <= 0 || total <= 0) {
         if (entries) free_entries(entries, count);
         return 0;
@@ -359,34 +366,38 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
     int kbd_lens[256], nkbd = 0;
     int mask_lens[256], nmask = 0;
 
-    fprintf(stderr, "pcfg: saving grammar to \"%s\"\n", outdir);
+    int af = ctx->admit_threshold;
+    if (af > 0)
+        fprintf(stderr, "pcfg: saving grammar to \"%s\" (admission filter: min count %d)\n", outdir, af);
+    else
+        fprintf(stderr, "pcfg: saving grammar to \"%s\"\n", outdir);
 
-    /* Grammar (base structures) */
+    /* Grammar (base structures — no admission filter) */
     snprintf(subdir, sizeof(subdir), "%s/Grammar", outdir);
     save_flat_counter(subdir, "grammar.txt", ctx->cnt_base);
 
     /* Also save raw grammar */
     save_flat_counter(subdir, "raw_grammar.txt", ctx->cnt_base);
 
-    /* Alpha */
+    /* Alpha (apply admission filter) */
     snprintf(subdir, sizeof(subdir), "%s/Alpha", outdir);
-    save_len_counters(subdir, ctx->cnt_alpha, alpha_lens, &nalpha);
+    save_len_counters(subdir, ctx->cnt_alpha, alpha_lens, &nalpha, af);
 
     /* Capitalization masks */
     snprintf(subdir, sizeof(subdir), "%s/Capitalization", outdir);
-    save_len_counters(subdir, ctx->cnt_masks, mask_lens, &nmask);
+    save_len_counters(subdir, ctx->cnt_masks, mask_lens, &nmask, 0);
 
-    /* Digits */
+    /* Digits (apply admission filter) */
     snprintf(subdir, sizeof(subdir), "%s/Digits", outdir);
-    save_len_counters(subdir, ctx->cnt_digits, digit_lens, &ndigits);
+    save_len_counters(subdir, ctx->cnt_digits, digit_lens, &ndigits, af);
 
-    /* Other */
+    /* Other (apply admission filter) */
     snprintf(subdir, sizeof(subdir), "%s/Other", outdir);
-    save_len_counters(subdir, ctx->cnt_other, other_lens, &nother);
+    save_len_counters(subdir, ctx->cnt_other, other_lens, &nother, af);
 
     /* Keyboard */
     snprintf(subdir, sizeof(subdir), "%s/Keyboard", outdir);
-    save_len_counters(subdir, ctx->cnt_keyboard, kbd_lens, &nkbd);
+    save_len_counters(subdir, ctx->cnt_keyboard, kbd_lens, &nkbd, 0);
 
     /* Years */
     snprintf(subdir, sizeof(subdir), "%s/Years", outdir);
