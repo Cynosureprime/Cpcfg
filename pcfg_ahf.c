@@ -162,7 +162,7 @@ static int omen_generate_word(OmenGen *og, int target_len, int max_level,
 
     /* Find a starting prefix with IP level <= max_level */
     /* Try random prefixes from alphabet */
-    for (int attempt = 0; attempt < 100; attempt++) {
+    for (int attempt = 0; attempt < 200; attempt++) {
         char prefix[8];
         for (int i = 0; i < prefix_len; i++) {
             *seed = *seed * 1103515245 + 12345;
@@ -233,8 +233,13 @@ int pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count) {
     int64_t generated = 0;
     unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
 
-    /* For each base structure (probability-ordered), generate synthetic passwords */
-    for (int si = 0; si < ctx->nbases && generated < count; si++) {
+    /* Only use top structures by probability — loading millions is wasteful.
+     * Cap at 100K or nbases, whichever is smaller. */
+    int max_structs = ctx->nbases < 100000 ? ctx->nbases : 100000;
+
+    /* Multiple passes at increasing Markov levels for broader coverage */
+    for (int level = 2; level <= 10 && generated < count; level++) {
+    for (int si = 0; si < max_structs && generated < count; si++) {
         BaseStructure *bs = &ctx->bases[si];
         if (bs->nreplace <= 0) continue;
 
@@ -244,10 +249,9 @@ int pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count) {
             if (bs->replacements[j][0] != 'M') has_real = 1;
         if (!has_real) continue;
 
-        /* Generate multiple passwords for this structure */
-        int per_struct = (int)(bs->prob * 1000);
-        if (per_struct < 1) per_struct = 1;
-        if (per_struct > 100) per_struct = 100;
+        /* Scale attempts by probability — high-prob structures get more */
+        int per_struct = (int)(bs->prob * 10000) + 5;
+        if (per_struct > 500) per_struct = 500;
 
         for (int g = 0; g < per_struct && generated < count; g++) {
             char pw[256];
@@ -262,7 +266,7 @@ int pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count) {
                 if (type[0] == 'A') {
                     /* Generate synthetic alpha word via OMEN */
                     char word[64];
-                    int wlen = omen_generate_word(og, tlen, 5, word, &seed);
+                    int wlen = omen_generate_word(og, tlen, level, word, &seed);
                     if (wlen > 0 && pwpos + wlen < 250) {
                         memcpy(pw + pwpos, word, wlen);
                         pwpos += wlen;
@@ -310,7 +314,11 @@ int pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count) {
             outbuf[outpos++] = '\n';
             generated++;
         }
-    }
+    }  /* end structure loop */
+
+    fprintf(stderr, "\rpcfg: AHF level %d: %" PRId64 " passwords so far...", level, generated);
+    }  /* end level loop */
+    fprintf(stderr, "\n");
 
     if (outpos > 0)
         write(STDOUT_FILENO, outbuf, outpos);

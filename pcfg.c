@@ -23,7 +23,7 @@
 #include "pcfg.h"
 #include "yarn.h"
 
-#define VERSION "1.02"
+#define VERSION "1.03"
 
 /* ---- Memory usage reporting ---- */
 #ifdef MACOSX
@@ -88,7 +88,7 @@ void ws_free(WorkSpace *ws) {
 }
 
 /* Globals */
-static volatile int Interrupted = 0;
+volatile int Interrupted = 0;
 
 static void sigint_handler(int sig) {
     (void)sig;
@@ -670,8 +670,7 @@ int main(int argc, char **argv) {
     if (max_threads > 0)
         tctx.max_threads = max_threads;
 
-    /* Install signal handler */
-    signal(SIGINT, sigint_handler);
+    /* SIGINT: use default handler (terminate). Don't catch it. */
 
     /* AHF mode: -A -g <grammar> [-n count] */
     if (mode_ahf && grammardir) {

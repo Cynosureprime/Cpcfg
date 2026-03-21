@@ -239,6 +239,9 @@ char *arena_strdup(Arena *a, const char *s);
 char *arena_strndup(Arena *a, const char *s, size_t n);
 void  arena_free(Arena *a);
 
+/* Signal handling */
+extern volatile int Interrupted;
+
 /* UTF-8 */
 int      utf8_decode(const char *s, int len, uint32_t *cp);
 int      utf8_encode(char *buf, uint32_t cp);
