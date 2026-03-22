@@ -377,19 +377,21 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
     while (!gen_done && pq_pop(&ctx->queue, &item)) {
         pt_count++;
 
-        /* Push to work ring */
+        /* Find children BEFORE pushing to ring — worker will free item.nodes */
+        int nchildren;
+        PTItem *children = find_children(ctx, &item, &nchildren);
+
+        /* Push to work ring — transfers ownership of item.nodes to worker */
         possess(pt_space);
         wait_for(pt_space, NOT_TO_BE, 0);
         int slot = pt_head % PT_RING_SIZE;
-        pt_ring[slot] = item;  /* nodes pointer transferred to worker */
+        pt_ring[slot] = item;
         pt_head++;
         twist(pt_space, BY, -1);
         possess(pt_have);
         twist(pt_have, BY, +1);
 
-        /* Find children, push to queue */
-        int nchildren;
-        PTItem *children = find_children(ctx, &item, &nchildren);
+        /* Push children to queue (uses children's own nodes, not item.nodes) */
         for (int i = 0; i < nchildren; i++)
             pq_push(&ctx->queue, &children[i]);
         free(children);
