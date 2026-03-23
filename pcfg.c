@@ -23,7 +23,7 @@
 #include "pcfg.h"
 #include "yarn.h"
 
-#define VERSION "1.04"
+#define VERSION "1.05"
 
 /* ---- Memory usage reporting ---- */
 #ifdef MACOSX

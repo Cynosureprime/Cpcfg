@@ -112,41 +112,37 @@ void pq_free(PQueue *pq) {
     pq->size = pq->cap = 0;
 }
 
+/* ---- Resolve cached GEL pointer ---- */
+static inline GrammarEntryList *get_gel(GenCtx *ctx, PTNode *node) {
+    if (node->gel_cache) return (GrammarEntryList *)node->gel_cache;
+    Word_t *pv;
+    JSLG(pv, ctx->grammar, (uint8_t *)node->type);
+    if (!pv) return NULL;
+    node->gel_cache = (void *)*pv;
+    return (GrammarEntryList *)node->gel_cache;
+}
+
 /* ---- Compute probability for a parse tree ---- */
 double find_prob(GenCtx *ctx, PTNode *nodes, int nnodes, double base_prob) {
     double prob = base_prob;
-    Word_t *pv;
-
     for (int i = 0; i < nnodes; i++) {
-        JSLG(pv, ctx->grammar, (uint8_t *)nodes[i].type);
-        if (!pv) return 0.0;
-        GrammarEntryList *gel = (GrammarEntryList *)*pv;
-        if (nodes[i].index >= gel->nentries) return 0.0;
+        GrammarEntryList *gel = get_gel(ctx, &nodes[i]);
+        if (!gel || nodes[i].index >= gel->nentries) return 0.0;
         prob *= gel->entries[nodes[i].index].prob;
     }
     return prob;
 }
 
-/* ---- Get number of entries for a type ---- */
-static int type_entry_count(GenCtx *ctx, const char *type) {
-    Word_t *pv;
-    JSLG(pv, ctx->grammar, (uint8_t *)type);
-    if (!pv) return 0;
-    GrammarEntryList *gel = (GrammarEntryList *)*pv;
-    return gel->nentries;
-}
-
 /* ---- areYouMyChild: pruning check ----
- * Ensures that a candidate child's "virtual parents" at other positions
- * have already been explored.
+ * Uses scratch buffer (already a copy of parent nodes with index incremented).
+ * Temporarily decrements other positions to check virtual parent probabilities.
  */
-int are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
+static int are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
                      double base_prob, int parent_pos, double parent_prob) {
     for (int pos = 0; pos < nnodes; pos++) {
         if (pos == parent_pos) continue;
         if (child[pos].index == 0) continue;
 
-        /* Temporarily decrement to compute virtual parent probability */
         child[pos].index--;
         double vprob = find_prob(ctx, child, nnodes, base_prob);
         child[pos].index++;
@@ -159,38 +155,42 @@ int are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
     return 1;
 }
 
-/* ---- findChildren: generate successor parse trees ---- */
-PTItem *find_children(GenCtx *ctx, PTItem *parent, int *nchildren) {
-    PTItem *children = malloc(parent->nnodes * sizeof(PTItem));
+/* ---- findChildren: generate successor parse trees ----
+ * Uses caller-provided stack buffer to avoid malloc per call.
+ * Only allocates (via malloc) for children that pass the pruning check.
+ */
+#define MAX_PT_NODES 64
+int find_children(GenCtx *ctx, PTItem *parent, PTItem *children) {
     int nc = 0;
+    int nn = parent->nnodes;
+    PTNode scratch[MAX_PT_NODES];
 
-    for (int pos = 0; pos < parent->nnodes; pos++) {
-        int max_idx = type_entry_count(ctx, parent->nodes[pos].type);
-        if (parent->nodes[pos].index + 1 >= max_idx)
-            continue;  /* Already at last entry */
-
-        /* Create child by incrementing index at this position */
-        PTNode *cnodes = malloc(parent->nnodes * sizeof(PTNode));
-        memcpy(cnodes, parent->nodes, parent->nnodes * sizeof(PTNode));
-        cnodes[pos].index++;
-
-        /* Pruning check */
-        if (!are_you_my_child(ctx, cnodes, parent->nnodes,
-                              parent->base_prob, pos, parent->prob)) {
-            free(cnodes);
+    for (int pos = 0; pos < nn; pos++) {
+        GrammarEntryList *gel = get_gel(ctx, &parent->nodes[pos]);
+        if (!gel || parent->nodes[pos].index + 1 >= gel->nentries)
             continue;
-        }
 
-        double cprob = find_prob(ctx, cnodes, parent->nnodes, parent->base_prob);
+        /* Build candidate in scratch buffer */
+        memcpy(scratch, parent->nodes, nn * sizeof(PTNode));
+        scratch[pos].index++;
+
+        if (!are_you_my_child(ctx, scratch, nn,
+                              parent->base_prob, pos, parent->prob))
+            continue;
+
+        double cprob = find_prob(ctx, scratch, nn, parent->base_prob);
+
+        /* Only malloc for accepted children */
+        PTNode *cnodes = malloc(nn * sizeof(PTNode));
+        memcpy(cnodes, scratch, nn * sizeof(PTNode));
 
         children[nc].prob = cprob;
         children[nc].base_prob = parent->base_prob;
         children[nc].nodes = cnodes;
-        children[nc].nnodes = parent->nnodes;
-        children[nc].seq = 0;  /* Will be set by pq_push */
+        children[nc].nnodes = nn;
+        children[nc].seq = 0;
         nc++;
     }
 
-    *nchildren = nc;
-    return children;
+    return nc;
 }

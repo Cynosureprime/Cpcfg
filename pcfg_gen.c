@@ -39,7 +39,7 @@ static volatile int pt_head, pt_tail;
 static lock    *pt_have;
 static lock    *pt_space;
 
-/* Single write lock for stdout */
+/* Write lock for stdout (parallel path only, NULL in single-threaded) */
 static lock    *write_lock;
 
 static const char hextab_lc[16] = "0123456789abcdef";
@@ -68,7 +68,7 @@ typedef struct {
 
 static void worker_flush(Worker *w) {
     if (w->outpos > 0) {
-        possess(write_lock);
+        if (write_lock) possess(write_lock);
         int remaining = w->outpos;
         char *p = w->outbuf;
         while (remaining > 0) {
@@ -77,7 +77,7 @@ static void worker_flush(Worker *w) {
             p += n;
             remaining -= n;
         }
-        twist(write_lock, TO, 0);
+        if (write_lock) twist(write_lock, TO, 0);
         w->outpos = 0;
     }
 }
@@ -104,8 +104,8 @@ static inline void worker_emit(Worker *w, const char *guess, int len) {
         w->outbuf[w->outpos++] = '\n';
     }
     w->count++;
-    if (guess_limit_val > 0 &&
-        __sync_add_and_fetch(&guess_count, 1) >= guess_limit_val)
+    guess_count++;
+    if (guess_limit_val > 0 && guess_count >= guess_limit_val)
         gen_done = 1;
 }
 
@@ -137,11 +137,16 @@ static void expand_item(GenCtx *ctx, PTNode *nodes, int nnodes,
     PTNode *node = &nodes[node_idx];
     char type_char = node->type[0];
 
-    Word_t *pv;
-    JSLG(pv, ctx->grammar, (uint8_t *)node->type);
-    if (!pv) return;
-
-    GrammarEntryList *gel = (GrammarEntryList *)*pv;
+    GrammarEntryList *gel;
+    if (node->gel_cache) {
+        gel = (GrammarEntryList *)node->gel_cache;
+    } else {
+        Word_t *pv;
+        JSLG(pv, ctx->grammar, (uint8_t *)node->type);
+        if (!pv) return;
+        gel = (GrammarEntryList *)*pv;
+        node->gel_cache = gel;
+    }
     if (node->index >= gel->nentries) return;
     GrammarEntry *ge = &gel->entries[node->index];
 
@@ -213,10 +218,9 @@ static void seed_queue(GenCtx *ctx) {
             if (gel->nentries <= 0) { valid = 0; break; }
         }
         if (!valid) continue;
-        PTNode *nodes = malloc(bs->nreplace * sizeof(PTNode));
+        PTNode *nodes = calloc(bs->nreplace, sizeof(PTNode));
         for (int j = 0; j < bs->nreplace; j++) {
             strncpy(nodes[j].type, bs->replacements[j], PCFG_MAXTYPE - 1);
-            nodes[j].type[PCFG_MAXTYPE - 1] = '\0';
             nodes[j].index = 0;
         }
         PTItem item;
@@ -296,168 +300,60 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
     gen_done = 0;
     guess_count = 0;
     guess_limit_val = ctx->guess_limit;
+    write_lock = NULL;
 
-    int nworkers = ctx->nthreads;
-    if (nworkers < 1) nworkers = 1;
-
-    /* Single-threaded path for debug or -T 1 */
-    if (ctx->debug || nworkers == 1) {
-        struct timespec t0;
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-
-        Worker w;
-        w.outbuf = malloc(OUTBUF_SIZE);
-        w.outpos = 0;
-        w.guessbuf = malloc(PCFG_MAXLINE);
-        w.saved = malloc(PCFG_MAXLINE);
-        w.count = 0;
-
-        PTItem item;
-        while (pq_pop(&ctx->queue, &item)) {
-            if (ctx->debug) debug_print_pt(ctx, &item);
-            expand_item(ctx, item.nodes, item.nnodes, 0, w.guessbuf, 0, &w);
-            if (w.outpos > 0) {
-                write(STDOUT_FILENO, w.outbuf, w.outpos);
-                w.outpos = 0;
-            }
-            int nchildren;
-            PTItem *children = find_children(ctx, &item, &nchildren);
-            for (int i = 0; i < nchildren; i++)
-                pq_push(&ctx->queue, &children[i]);
-            free(children);
-            free(item.nodes);
-            if (ctx->guess_limit > 0 && w.count >= ctx->guess_limit)
-                break;
-        }
-        if (w.outpos > 0)
-            write(STDOUT_FILENO, w.outbuf, w.outpos);
-
-        struct timespec tend;
-        clock_gettime(CLOCK_MONOTONIC, &tend);
-        double elapsed = (tend.tv_sec - t0.tv_sec) + (tend.tv_nsec - t0.tv_nsec) / 1e9;
-        fprintf(stderr, "\rpcfg: done. %" PRId64 " guesses in %.2fs (%.1fM/s)\n",
-                w.count, elapsed, elapsed > 0 ? w.count / elapsed / 1e6 : 0.0);
-        free(w.outbuf); free(w.guessbuf); free(w.saved);
-        pq_free(&ctx->queue);
-        return 0;
-    }
-
-    /* ---- Parallel path ---- */
-    fprintf(stderr, "pcfg: generating with %d worker threads\n", nworkers);
-
-    /* Pre-allocate all worker state */
-    Worker *workers = malloc(nworkers * sizeof(Worker));
-    for (int i = 0; i < nworkers; i++) {
-        workers[i].outbuf = malloc(OUTBUF_SIZE);
-        workers[i].outpos = 0;
-        workers[i].guessbuf = malloc(PCFG_MAXLINE);
-        workers[i].saved = malloc(PCFG_MAXLINE);
-        workers[i].count = 0;
-    }
-
-    /* Pre-allocate work ring */
-    pt_ring = calloc(PT_RING_SIZE, sizeof(PTItem));
-    pt_head = pt_tail = 0;
-    pt_have = new_lock(0);
-    pt_space = new_lock(PT_RING_SIZE);
-    write_lock = new_lock(0);
-
-    struct timespec t0;
+    struct timespec t0, tlast;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    tlast = t0;
 
-    /* Launch workers */
-    for (int i = 0; i < nworkers; i++)
-        launch(gen_worker, &workers[i]);
+    Worker w;
+    w.outbuf = malloc(OUTBUF_SIZE);
+    w.outpos = 0;
+    w.guessbuf = malloc(PCFG_MAXLINE);
+    w.saved = malloc(PCFG_MAXLINE);
+    w.count = 0;
 
-    /* Popper: main thread */
     int64_t pt_count = 0;
-    struct timespec tlast = t0;
     PTItem item;
+    while (pq_pop(&ctx->queue, &item)) {
+        if (ctx->debug) debug_print_pt(ctx, &item);
+        expand_item(ctx, item.nodes, item.nnodes, 0, w.guessbuf, 0, &w);
 
-    while (!gen_done && pq_pop(&ctx->queue, &item)) {
-        pt_count++;
-
-        /* Find children BEFORE pushing to ring — worker will free item.nodes */
-        int nchildren;
-        PTItem *children = find_children(ctx, &item, &nchildren);
-
-        /* Push to work ring — transfers ownership of item.nodes to worker */
-        possess(pt_space);
-        wait_for(pt_space, NOT_TO_BE, 0);
-        int slot = pt_head % PT_RING_SIZE;
-        pt_ring[slot] = item;
-        pt_head++;
-        twist(pt_space, BY, -1);
-        possess(pt_have);
-        twist(pt_have, BY, +1);
-
-        /* Push children to queue (uses children's own nodes, not item.nodes) */
+        PTItem children[MAX_PT_NODES];
+        int nchildren = find_children(ctx, &item, children);
         for (int i = 0; i < nchildren; i++)
             pq_push(&ctx->queue, &children[i]);
-        free(children);
+        free(item.nodes);
 
-        /* Check limit */
-        if (guess_limit_val > 0 &&
-            __sync_fetch_and_add(&guess_count, 0) >= guess_limit_val) {
-            gen_done = 1;
+        pt_count++;
+        if (guess_limit_val > 0 && w.count >= guess_limit_val)
             break;
-        }
 
-        /* Progress */
+        /* Progress every ~16K PTs */
         if ((pt_count & 0x3FFF) == 0) {
             struct timespec tnow;
             clock_gettime(CLOCK_MONOTONIC, &tnow);
             double elapsed = (tnow.tv_sec - tlast.tv_sec) +
                              (tnow.tv_nsec - tlast.tv_nsec) / 1e9;
             if (elapsed >= 2.0) {
-                int64_t cur = __sync_fetch_and_add(&guess_count, 0);
                 double total_elapsed = (tnow.tv_sec - t0.tv_sec) +
                                        (tnow.tv_nsec - t0.tv_nsec) / 1e9;
                 fprintf(stderr, "\rpcfg: %" PRId64 " guesses (%" PRId64 " PTs) "
                         "%.1fM/s prob=%.4e q=%d  ",
-                        cur, pt_count, cur / total_elapsed / 1e6,
+                        w.count, pt_count, w.count / total_elapsed / 1e6,
                         item.prob, ctx->queue.size);
                 tlast = tnow;
             }
         }
     }
-
-    /* Send sentinel per worker */
-    gen_done = 1;
-    for (int i = 0; i < nworkers; i++) {
-        possess(pt_space);
-        wait_for(pt_space, NOT_TO_BE, 0);
-        int slot = pt_head % PT_RING_SIZE;
-        memset(&pt_ring[slot], 0, sizeof(PTItem));
-        pt_ring[slot].nnodes = -1;
-        pt_head++;
-        twist(pt_space, BY, -1);
-        possess(pt_have);
-        twist(pt_have, BY, +1);
-    }
-
-    join_all();
+    worker_flush(&w);
 
     struct timespec tend;
     clock_gettime(CLOCK_MONOTONIC, &tend);
-    double total_elapsed = (tend.tv_sec - t0.tv_sec) +
-                           (tend.tv_nsec - t0.tv_nsec) / 1e9;
-    int64_t final_count = __sync_fetch_and_add(&guess_count, 0);
+    double elapsed = (tend.tv_sec - t0.tv_sec) + (tend.tv_nsec - t0.tv_nsec) / 1e9;
     fprintf(stderr, "\rpcfg: done. %" PRId64 " guesses in %.2fs (%.1fM/s)\n",
-            final_count, total_elapsed,
-            total_elapsed > 0 ? final_count / total_elapsed / 1e6 : 0.0);
-
-    /* Cleanup */
-    for (int i = 0; i < nworkers; i++) {
-        free(workers[i].outbuf);
-        free(workers[i].guessbuf);
-        free(workers[i].saved);
-    }
-    free(workers);
-    free(pt_ring);
-    free_lock(pt_have);
-    free_lock(pt_space);
-    free_lock(write_lock);
+            w.count, elapsed, elapsed > 0 ? w.count / elapsed / 1e6 : 0.0);
+    free(w.outbuf); free(w.guessbuf); free(w.saved);
     pq_free(&ctx->queue);
     return 0;
 }

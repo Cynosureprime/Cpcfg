@@ -72,6 +72,7 @@ typedef struct {
 typedef struct {
     char type[PCFG_MAXTYPE];
     int  index;             /* index into GrammarEntryList for this type */
+    void *gel_cache;        /* cached GrammarEntryList* to avoid repeated Judy lookups */
 } PTNode;
 
 /* Priority queue item */
@@ -221,9 +222,8 @@ void    pq_push(PQueue *pq, PTItem *item);
 int     pq_pop(PQueue *pq, PTItem *out);
 int     pq_empty(PQueue *pq);
 void    pq_free(PQueue *pq);
-PTItem *find_children(GenCtx *ctx, PTItem *parent, int *nchildren);
-int     are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
-                         double base_prob, int parent_pos, double parent_prob);
+#define MAX_PT_NODES 64
+int     find_children(GenCtx *ctx, PTItem *parent, PTItem *children);
 double  find_prob(GenCtx *ctx, PTNode *nodes, int nnodes, double base_prob);
 
 /* pcfg_gen.c - guess generation */

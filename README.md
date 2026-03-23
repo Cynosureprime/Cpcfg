@@ -274,17 +274,15 @@ Larger datasets:
 | rockyou.txt | 14.3M | macOS x86_64 | 16 | **24s** | 14.9 GB |
 | BigBabyPass | 332M | Linux x86_64 | 72 | **15 min** | 159 GB |
 
-### Generation (same machine, macOS x86_64, 16 threads)
+### Generation (same machine, macOS x86_64, rockyou.txt grammar)
 
-| Guesses | Cpcfg | pcfg-go | Speedup |
+| Guesses | Cpcfg | pcfg-go v0.5.2 | Speedup |
 |---|---|---|---|
-| 1M | **4.4s** | 5.1s | **1.2x** |
-| 50M | **27.4s** | 16.9s | 0.6x |
-| 100M | **27.4s** | 28.7s | **1.0x** |
+| 1M | **1.0s** | 2.5s | **2.4x** |
+| 50M | **9.6s** | 15.0s | **1.6x** |
+| 100M | **17.3s** | 26.8s | **1.5x** |
 
-Note: Cpcfg generation is currently bottlenecked by stdout write contention across worker threads. In pipeline use (`pcfg | mdxfind`), the downstream consumer is typically the limiting factor.
-
-pcfg_cracker (Python): 28s for 1M guesses (22x slower than Cpcfg).
+pcfg_cracker (Python): 28s for 1M guesses (28x slower than Cpcfg).
 
 
 Key optimizations:
