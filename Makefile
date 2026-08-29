@@ -57,3 +57,12 @@ clean:
 	rm -f pcfg $(OBJS)
 
 .PHONY: clean
+
+# Man pages. Source only -- man renders per terminal width, locale and
+# encoding, and every packager expects roff and compresses it itself.
+PREFIX ?= /usr/local
+MANDIR ?= $(PREFIX)/share/man
+
+install-man:
+	install -d $(DESTDIR)$(MANDIR)/man1
+	install -m 644 man/man1/*.1 $(DESTDIR)$(MANDIR)/man1/

@@ -1,0 +1,280 @@
+.\" pcfg(1) -- man-macro reference page
+.\" $Revision: 1.3 $
+.\" $Log: pcfg.1,v $
+.\" Revision 1.3  2026/08/29 17:52:49  dlr
+.\" Correct two versions that my own source changes made stale.
+.\"
+.\" pcfg 1.05 to 1.18: the version is now the RCS revision of pcfg.c rather than a
+.\" hand-maintained constant, so the TH line has to track the revision. The -V entry
+.\" records the mechanism and why, since a reader comparing an old binary against
+.\" this page needs to know the number changed meaning, not just value.
+.\"
+.\" encforce 1.1.0 to v1.1.0: its version now comes from git describe at build time,
+.\" so it names the tag, the commits since it, and whether the tree was dirty. The
+.\" TH field names the tag it documents; the -V entry explains the fuller string a
+.\" running binary prints and that a tree without git history reports unknown.
+.\"
+.\" Both drifted because the source changed after the pages were written, which is
+.\" exactly the failure the version-vs-source check exists to catch. It caught it.
+.\"
+.\" Revision 1.2  2026/08/29 17:35:15  dlr
+.\" Update for pcfg.c: -a is now training-only and the new bare flag -k carries "keep case as trained". Documents -k as working, since gctx.skip_case was previously assigned but never read anywhere and add_case_mangling was called unconditionally, so case suppression had never worked at all; pcfg_gen.c now gates the call on !ctx->skip_case. Drops the OVERLOADED OPTIONS section, which existed for -n and -a and now has only -n left; the -n note folds into its training entry, cross-referenced from generation. Removes the retired "-a fails outright" and "-a 0 workaround" text. Adds a -k example. Verified against source and by running: -k is bare and works, -a still takes an argument and is training-only, binary now reports v1.05 matching the source define.
+.\"
+.\" Revision 1.1  2026/08/29 17:16:18  dlr
+.\" Initial revision: pcfg(1) man page. All 20 getopt options verified against the switch in pcfg.c. Documents the five modes, the training and generation option sets, and an OVERLOADED OPTIONS section for -n and -a, which mean different things per mode. Records that -a always requires an argument in both modes because it is declared a: even though the built-in help shows it as a bare flag for generation, so the documented generation form fails; supply an ignored value. Records -r as an undocumented alias for -g, and -h and -V as absent from the help. BUILDING notes that pcfg is the first Makefile target so a bare make builds it despite there being no all target.
+.\"
+.TH PCFG 1 "2026-08-29" "pcfg 1.18" "Password Recovery"
+.SH NAME
+pcfg \- probabilistic context-free grammar password generator
+.SH SYNOPSIS
+.B pcfg
+.BI \-t " wordlist"
+.BI \-g " grammardir"
+.RI [ options ]
+.br
+.B pcfg
+.B \-G
+.BI \-g " grammardir"
+.RI [ options ]
+.br
+.B pcfg
+.B \-A
+.BI \-g " grammardir"
+.RB [ \-n
+.IR count ]
+.br
+.B pcfg
+.B \-i
+.BI \-g " grammardir"
+.br
+.B pcfg
+.BI \-M " grammar1"
+.BI \-M " grammar2"
+.BI \-g " outputdir"
+.SH DESCRIPTION
+.B pcfg
+learns the structure of real passwords from a wordlist and then generates
+new candidates in decreasing order of probability.  Rather than mangling
+words with fixed rules, it builds a probabilistic context-free grammar:
+base structures such as
+.RI letters- digits - symbols ,
+with learned distributions over what fills each slot, how words are
+capitalised, which years and keyboard walks appear, and how often.
+Generation then walks that grammar most-probable-first.
+.PP
+It is a C reimplementation of pcfg-go, and it complements rule-based
+generation rather than replacing it.  Rules encode what a human analyst
+noticed; a grammar encodes what the training corpus actually contains.
+.PP
+Every mode reads or writes a
+.I grammar directory
+named by
+.BR \-g ,
+which training creates and the other modes consume.
+.B \-g
+is required in all modes.
+.SH MODES
+Exactly one mode must be selected.  Training is implied by
+.BR \-t .
+.TP
+.BI \-t " wordlist"
+.B Train.
+Build a grammar from
+.IR wordlist ,
+writing it into the
+.B \-g
+directory, which is created if absent.  Progress and a final password count
+go to standard error.
+.TP
+.B \-G
+.B Generate.
+Emit candidates from the
+.B \-g
+grammar on standard output.  Cannot be combined with
+.BR \-t .
+.TP
+.B \-A
+.B AHF.
+Synthetic generation from the
+.B \-g
+grammar.  The count comes from
+.BR \-n ,
+defaulting to 1,000,000.
+.TP
+.B \-i
+.B Info.
+Print statistics for the
+.B \-g
+grammar \(em base structure count, and per-category entry counts for Alpha,
+Digits, Other, Keyboard, Capitalization, Years and Context \(em then exit.
+.TP
+.BI \-M " grammardir"
+.B Merge.
+Combine two grammars into the
+.B \-g
+output directory.  Give
+.B \-M
+exactly twice; one or more than two is a fatal error.
+.SH "TRAINING OPTIONS"
+.TP
+.BI \-g " dir"
+Grammar directory.  Required in every mode.
+.TP
+.B \-w
+Weighted input: each line is
+.IB count : password
+rather than a bare password.
+.TP
+.BI \-f " count"
+Admission filter.  Discard entries seen fewer than
+.I count
+times.  Default 0, which disables the filter.
+.TP
+.B \-F
+Filter junk lines \(em base64, hex hashes and JSON \(em out of the training
+input.
+.TP
+.B \-S
+Save sensitive data.  Retains email addresses and full URLs in the grammar,
+which are discarded by default.
+.TP
+.BI \-c " coverage"
+Split between PCFG and OMEN generation, from 0.0 to 1.0.  Default 0.6.
+Values outside that range are a fatal error.
+.TP
+.BI \-n " size"
+OMEN n-gram size, 2 to 5.  Default 4.
+.IP
+.B \-n
+is written to both the n-gram size and the generation guess limit from the
+same argument; which one takes effect is decided after parsing, by whether
+.B \-t
+was given.  The two modes are mutually exclusive, so this is unambiguous in
+use, but it is why the option appears in both lists below.
+.TP
+.BI \-a " size"
+Alphabet size for the Markov model.  Default 100.  Training only \(em it has
+no effect on generation.
+.TP
+.BI \-C " text"
+Free-text comment recorded in the grammar's configuration.
+.TP
+.BI \-T " count"
+Maximum threads.  Default automatic.
+.SH "GENERATION OPTIONS"
+.TP
+.BI \-n " count"
+Maximum guesses.  0 means unlimited.  Shares its argument with the training
+n-gram size; see
+.B \-n
+under
+.BR "TRAINING OPTIONS" .
+.TP
+.B \-b
+Skip the OMEN and Markov guesses, emitting only grammar-derived candidates.
+.TP
+.B \-k
+Keep case as trained: suppress case mangling.  By default the generator
+applies the capitalisation patterns learned during training, so a base word
+is emitted in several cases.
+.B \-k
+emits each candidate with the case the grammar recorded and nothing more,
+which cuts the candidate count substantially and is the right choice when
+the target is known to be case-sensitive in a way the corpus already
+reflects.
+.TP
+.B \-d
+Emit debug output instead of guesses.
+.TP
+.BI \-T " count"
+Maximum threads.  Default automatic.
+.SH "OTHER OPTIONS"
+.TP
+.BI \-r " dir"
+Undocumented alias for
+.BR \-g .
+Accepted and fully equivalent; it does not appear in the built-in help.
+.TP
+.B \-h
+Print the usage summary and exit 0.
+.TP
+.B \-V
+Print the version and exit 0.
+The version is the RCS revision of
+.IR pcfg.c ,
+not a separately maintained number, so it always names the source that built
+the binary. It was a hand-maintained constant until 1.18, and had drifted: the
+source read 1.05 while the shipped binary reported 1.04.
+.SH BUILDING
+.B pcfg
+is the first target in its Makefile, so a bare
+.B make
+builds it even though there is no
+.B all
+target.  It requires Judy, pthreads and libm.
+.SH "EXIT STATUS"
+0 on success.  1 on a usage error, a missing or unreadable grammar
+directory, an out-of-range
+.B \-c
+value, a
+.B \-M
+given other than twice, no mode selected, or
+.B \-t
+combined with
+.BR \-G .
+.SH EXAMPLES
+Train a grammar from a leak, filtering junk and requiring each entry to have
+been seen at least twice:
+.PP
+.RS
+.nf
+pcfg \-t leak.txt \-g grammar \-F \-f 2
+.fi
+.RE
+.PP
+Train from a weighted frequency list:
+.PP
+.RS
+.nf
+pcfg \-t counts.txt \-g grammar \-w
+.fi
+.RE
+.PP
+Inspect what the training produced:
+.PP
+.RS
+.nf
+pcfg \-i \-g grammar
+.fi
+.RE
+.PP
+Generate ten million candidates straight into a search:
+.PP
+.RS
+.nf
+pcfg \-G \-g grammar \-n 10000000 | mdxfind \-m e1 \-f hashes.txt stdin
+.fi
+.RE
+.PP
+The same, but without case mangling, when the corpus already carries the
+capitalisation you expect:
+.PP
+.RS
+.nf
+pcfg \-G \-g grammar \-k \-n 10000000 > candidates.txt
+.fi
+.RE
+.PP
+Combine grammars trained on two different corpora:
+.PP
+.RS
+.nf
+pcfg \-M grammar.a \-M grammar.b \-g grammar.merged
+.fi
+.RE
+.SH "SEE ALSO"
+.BR mdxfind (1),
+.BR procrule (1),
+.BR rling (1)
+.SH AUTHOR
+Waffle.
