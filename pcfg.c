@@ -6,6 +6,58 @@
  * Usage:
  *   pcfg -t <wordlist> <rules_dir>     Train on passwords
  *   pcfg -g <rules_dir>                Generate guesses
+ *
+ * $Revision: 1.19 $
+ * $Log: pcfg.c,v $
+ * Revision 1.19  2026/08/30 16:45:45  dlr
+ * Version 1.19: OMEN fixes in pcfg_train.c and pcfg_save.c.
+ *
+ * Small training sets now produce usable OMEN data, and merged grammars
+ * retain it.  No change to pcfg.c itself; deposited so pcfg_version(),
+ * which reads this file's revision, reports the version carrying the fix.
+ *
+ * Revision 1.18  2026/08/29 17:38:11  dlr
+ * Version from the RCS revision; -a stops being overloaded; case mangling works.
+ *
+ * Three separate defects, all in the same option.
+ *
+ * The version was a hand-maintained constant and it had drifted: the source said
+ * 1.05 while the committed binary reported 1.04, so -V could not identify what was
+ * actually running. It now comes from this files RCS revision through a Header
+ * string, the same rule mdxfind and procrule follow, and the release tag must
+ * equal it. Keyword stanzas added to the header comment, which this file lacked
+ * entirely despite being hand-authored.
+ *
+ * -a was declared with a required argument but the help documented it as a bare
+ * flag for generation, so pcfg -G -g dir -a failed outright. The handler also set
+ * both gctx.skip_case and tctx.alphabet_size on every use regardless of mode.
+ *
+ * Worse, and the reason this is a repair rather than a tidy-up: gctx.skip_case was
+ * never read. The field was declared, the assignment ran, and nothing consumed it.
+ * add_case_mangling in pcfg_gen.c was called unconditionally, so no case mangling
+ * had never worked in any invocation. There was no way to turn it off.
+ *
+ * Both halves are fixed. The generation call is gated on the flag that exists for
+ * it, and the flag has its own letter so neither mode carries a wart:
+ *
+ *   -a <int>   alphabet size for Markov training, unchanged
+ *   -k         keep case as trained, the flag -a was documented as providing
+ *
+ * -k rather than repairing -a in place because getopt cannot vary arity by mode,
+ * and nothing can depend on the old behaviour since it did nothing.
+ *
+ * Measured on a mixed-case training set, generating 60 candidates: default
+ * produced 40 unique of which 24 carried an uppercase letter; with -k, 18 unique
+ * and none did. -a 50 is still accepted for training.
+ *
+ * The pcfg.h comment naming the field as the -a flag is corrected to -k.
+ *
+ * Found while writing the man pages, by reading the source rather than the help
+ * text. Note the edits were first made in the github working copy, which is wrong:
+ * development happens here and the repository receives a copy. That copy has been
+ * reverted and all twelve pcfg files were verified byte-identical to this tree
+ * before the change, so nothing had diverged.
+ *
  */
 
 #include <stdio.h>
@@ -23,7 +75,32 @@
 #include "pcfg.h"
 #include "yarn.h"
 
-#define VERSION "1.05"
+/*
+ * The version IS the RCS revision of this file. It was a hand-maintained
+ * constant, which drifted: the source said 1.05 while the committed binary
+ * reported 1.04, so -V could not identify what was actually running. The
+ * release tag must equal this revision, the same rule mdxfind and procrule
+ * follow via their $Header strings.
+ */
+static char rcsid[] = "$Header: /Users/dlr/src/mdfind/RCS/pcfg.c,v 1.19 2026/08/30 16:45:45 dlr Exp dlr $";
+
+static const char *pcfg_version(void)
+{
+    static char buf[32];
+    const char *p = strstr(rcsid, "pcfg.c,v ");
+
+    if (!p)
+        return "unknown";
+    p += sizeof("pcfg.c,v ") - 1;
+    {
+        size_t n = strcspn(p, " ");
+        if (n >= sizeof buf)
+            n = sizeof buf - 1;
+        memcpy(buf, p, n);
+        buf[n] = '\0';
+    }
+    return buf;
+}
 
 /* ---- Memory usage reporting ---- */
 #ifdef MACOSX
@@ -453,10 +530,10 @@ static void usage(const char *prog) {
         "    -g <dir>    Grammar directory (previously created by -t training)\n"
         "    -n <int>    Max number of guesses (0 = unlimited)\n"
         "    -b          Skip OMEN/Markov guesses\n"
-        "    -a          No case mangling\n"
+        "    -k          Keep case as trained (no case mangling)\n"
         "    -d          Debug output instead of guesses\n"
         "    -T <int>    Max threads (default: auto)\n"
-        "\n", VERSION, prog, prog, prog, prog, prog);
+        "\n", pcfg_version(), prog, prog, prog, prog, prog);
 }
 
 /* ---- Main ---- */
@@ -484,7 +561,7 @@ int main(int argc, char **argv) {
     char *merge_dirs[2] = {NULL, NULL};
     int n_merge = 0;
 
-    while ((opt = getopt(argc, argv, "t:g:r:GiASwf:Fc:n:a:C:M:bdT:hV")) != -1) {
+    while ((opt = getopt(argc, argv, "t:g:r:GiASwf:Fc:n:a:C:M:bdkT:hV")) != -1) {
         switch (opt) {
         case 't':
             infile = optarg;
@@ -534,9 +611,10 @@ int main(int argc, char **argv) {
             gctx.guess_limit = atoll(optarg);
             break;
         case 'a':
-            /* Overloaded: alphabet size (training) or skip case (generation) */
-            gctx.skip_case = 1;
             tctx.alphabet_size = atoi(optarg);
+            break;
+        case 'k':
+            gctx.skip_case = 1;
             break;
         case 'C':
             tctx.comments = optarg;
@@ -556,7 +634,7 @@ int main(int argc, char **argv) {
             gctx.nthreads = max_threads;
             break;
         case 'V':
-            printf("pcfg v%s\n", VERSION);
+            printf("pcfg v%s\n", pcfg_version());
             return 0;
         case 'h':
         default:

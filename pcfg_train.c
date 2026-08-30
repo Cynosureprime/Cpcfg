@@ -584,6 +584,27 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
             counter_free(&char_freq);
             alphabet_built = 1;
             fprintf(stderr, "pcfg: alphabet built from first buffer\n");
+
+            /* The alphabet has to exist before an n-gram can be counted, so
+             * the loop above skipped this buffer's lines.  Walk it again now
+             * that the alphabet is known.  Without this, a training set that
+             * fits in a single TRAIN_CHUNK produces no OMEN data at all, and
+             * -A degenerates to random strings drawn from the alphabet. */
+            for (unsigned int li = 0; li < linecount; li++) {
+                char *pw = &readbuf[readindex[li].offset];
+                int pwlen = readindex[li].len;
+                if (pwlen <= 0 || pwlen >= TRAIN_MAXLINE - 64) continue;
+                if (ctx->weighted)
+                    (void)parse_weight(&pw, &pwlen);
+                if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
+                    int dlen = decode_hex(pw + 5, decoded_main, pwlen - 5);
+                    pw = decoded_main;
+                    pwlen = dlen;
+                }
+                if (pwlen <= 0) continue;
+                if (ctx->filter_junk && is_junk_line(pw, pwlen)) continue;
+                omen_train(omen, pw, pwlen);
+            }
         }
 
         /* Launch workers as needed */

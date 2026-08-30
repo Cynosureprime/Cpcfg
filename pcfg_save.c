@@ -30,6 +30,23 @@
 
 #include "pcfg.h"
 
+/* Copy one file verbatim.  Returns 0 on success, -1 otherwise. */
+static int copy_file(const char *src, const char *dst) {
+    FILE *fin = fopen(src, "rb");
+    if (!fin) return -1;
+    FILE *fout = fopen(dst, "wb");
+    if (!fout) { fclose(fin); return -1; }
+    char buf[65536];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), fin)) > 0) {
+        if (fwrite(buf, 1, n, fout) != n) { rc = -1; break; }
+    }
+    if (fclose(fout) != 0) rc = -1;
+    fclose(fin);
+    return rc;
+}
+
 /* ---- Sorting helper for counter entries ---- */
 typedef struct {
     char *key;
@@ -775,10 +792,33 @@ int pcfg_merge(const char *dir1, const char *dir2, const char *outdir) {
     for (int i = 0; dirs[i]; i++)
         merge_dir(dir1, dir2, outdir, dirs[i], 0);
 
-    /* Copy Omen from dir1 if it exists (don't merge OMEN data) */
+    /* Copy Omen from dir1 if it exists.  The n-gram tables are not
+     * mergeable, so the first grammar's OMEN data is carried across
+     * intact.  Creating the directory is not enough on its own: without
+     * the files, omen_load() fails and -A reports "AHF requires OMEN
+     * training data in grammar" on every merged grammar. */
     char src[PCFG_MAXPATH], dst[PCFG_MAXPATH];
     snprintf(dst, sizeof(dst), "%s/Omen", outdir);
     ensure_dir(dst);
+    {
+        char omensrc[PCFG_MAXPATH];
+        snprintf(omensrc, sizeof(omensrc), "%s/Omen", dir1);
+        DIR *od = opendir(omensrc);
+        if (od) {
+            struct dirent *de;
+            int copied = 0;
+            while ((de = readdir(od)) != NULL) {
+                if (de->d_name[0] == '.') continue;
+                snprintf(src, sizeof(src), "%s/Omen/%s", dir1, de->d_name);
+                snprintf(dst, sizeof(dst), "%s/Omen/%s", outdir, de->d_name);
+                if (copy_file(src, dst) == 0) copied++;
+            }
+            closedir(od);
+            if (copied)
+                fprintf(stderr, "pcfg: copied %d OMEN file%s from \"%s\"\n",
+                        copied, copied == 1 ? "" : "s", dir1);
+        }
+    }
 
     /* Copy config.ini from dir1 */
     snprintf(src, sizeof(src), "%s/config.ini", dir1);

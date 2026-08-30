@@ -293,7 +293,8 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
     if (pcfg_load(grammardir, ctx) < 0)
         return 1;
 
-    add_case_mangling(ctx->bases, ctx->nbases);
+    if (!ctx->skip_case)
+        add_case_mangling(ctx->bases, ctx->nbases);
     seed_queue(ctx);
 
     Gen = ctx;

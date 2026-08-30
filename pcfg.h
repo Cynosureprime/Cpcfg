@@ -160,7 +160,7 @@ typedef struct {
     int64_t guess_count;
     int64_t guess_limit;        /* 0 = unlimited */
     int skip_brute;             /* -b flag */
-    int skip_case;              /* -a flag */
+    int skip_case;              /* -k flag */
     int debug;                  /* -d flag */
     int nthreads;
 } GenCtx;
