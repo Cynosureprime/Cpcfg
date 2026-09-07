@@ -20,20 +20,37 @@ int utf8_decode(const char *s, int len, uint32_t *cp) {
         *cp = c;
         return 1;
     }
-    if ((c & 0xE0) == 0xC0 && len >= 2) {
+    /* A lead byte is only a lead byte if the continuations follow it.  Without
+     * this check a single-byte corpus is destroyed rather than merely
+     * misread: CP1252 "k\xf6ln1964" has 0xF6 for o-umlaut, (0xF6 & 0xF8) ==
+     * 0xF0 selects the four-byte branch, and 'l', 'n' and '1' are swallowed as
+     * continuations to yield U+1ACBB1.  56 of the 128 high bytes take a
+     * multi-byte branch this way -- the whole accented Latin-1 range, so every
+     * German, Spanish, French, Portuguese, Italian and Nordic word in a
+     * single-byte corpus is corrupted.  That matters because our corpora are
+     * split: pass.len256 (24 G) is 98.8% single-byte, and a trainer that
+     * mangles it is blind to every hash built from those bytes.
+     *
+     * On a genuine invalid sequence the byte is returned as a codepoint of its
+     * own value, which is exactly right for Latin-1 and CP1252 in the
+     * 0xA0-0xFF range, where byte == codepoint. */
+#define UTF8_CONT(x) (((unsigned char)(x) & 0xC0) == 0x80)
+    if ((c & 0xE0) == 0xC0 && len >= 2 && UTF8_CONT(s[1])) {
         *cp = ((c & 0x1F) << 6) | (s[1] & 0x3F);
-        return 2;
+        if (*cp >= 0x80) return 2;              /* reject overlong */
     }
-    if ((c & 0xF0) == 0xE0 && len >= 3) {
+    if ((c & 0xF0) == 0xE0 && len >= 3 && UTF8_CONT(s[1]) && UTF8_CONT(s[2])) {
         *cp = ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-        return 3;
+        if (*cp >= 0x800) return 3;             /* reject overlong */
     }
-    if ((c & 0xF8) == 0xF0 && len >= 4) {
+    if ((c & 0xF8) == 0xF0 && len >= 4 && UTF8_CONT(s[1]) && UTF8_CONT(s[2])
+                                       && UTF8_CONT(s[3])) {
         *cp = ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) |
               ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
-        return 4;
+        if (*cp >= 0x10000 && *cp <= 0x10FFFF) return 4;
     }
-    /* Invalid: skip one byte */
+#undef UTF8_CONT
+    /* Not well-formed UTF-8: one byte, value preserved. */
     *cp = c;
     return 1;
 }
@@ -155,8 +172,15 @@ int utf8_is_upper(uint32_t cp) {
     if (cp >= 0xC0 && cp <= 0xD6) return 1;
     if (cp >= 0xD8 && cp <= 0xDE) return 1;
 
-    /* Latin Extended-A: even codepoints 0x100-0x176 are uppercase */
-    if (cp >= 0x100 && cp <= 0x176 && (cp & 1) == 0) return 1;
+    /* Latin Extended-A: the even-is-uppercase run inverts for
+     * U+0139-U+0148 and resumes at U+014A.  Getting this wrong made
+     * l-stroke (U+0142, Polish) test as UPPERCASE, so build_case_mask wrote
+     * 'U' for it and generation then uppercased it to L-stroke.  It was
+     * invisible only because utf8_to_upper carried the same wrong parity and
+     * left it alone: two faults cancelling. */
+    if (cp >= 0x100 && cp <= 0x137 && (cp & 1) == 0) return 1;
+    if (cp >= 0x139 && cp <= 0x148 && (cp & 1) == 1) return 1;
+    if (cp >= 0x14A && cp <= 0x176 && (cp & 1) == 0) return 1;
 
     /* Cyrillic uppercase: U+0410-042F */
     if (cp >= 0x0410 && cp <= 0x042F) return 1;
@@ -173,6 +197,26 @@ int utf8_is_digit(uint32_t cp) {
     return (cp >= '0' && cp <= '9');
 }
 
+/* Re-encode a codepoint, preserving the width it arrived in.
+ *
+ * The hash covers BYTES.  A byte that was not part of a well-formed UTF-8
+ * sequence is a byte in whatever single-byte encoding the generating system
+ * used, and writing it back as a two-byte UTF-8 sequence changes the string
+ * and therefore the digest.  A terminal trained that way can never match the
+ * hash it came from: CP1252 "k\xf6ln1964" trains to UTF-8 "k\xc3\xb6ln1964",
+ * which is a different password as far as MD5 is concerned.
+ *
+ * In the 0xA0-0xFF range byte value == Latin-1 codepoint, so the case map
+ * still applies and the result still fits in one byte.  If a mapping ever
+ * left that range the original byte is kept rather than widened. */
+int utf8_encode_width(char *buf, uint32_t cp, int srcwidth) {
+    if (srcwidth == 1 && cp >= 0x80) {
+        buf[0] = (char)((cp < 0x100) ? cp : (cp & 0xFF));
+        return 1;
+    }
+    return utf8_encode(buf, cp);
+}
+
 uint32_t utf8_to_lower(uint32_t cp) {
     /* ASCII */
     if (cp >= 'A' && cp <= 'Z') return cp + 32;
@@ -181,8 +225,23 @@ uint32_t utf8_to_lower(uint32_t cp) {
     if (cp >= 0xC0 && cp <= 0xD6) return cp + 0x20;
     if (cp >= 0xD8 && cp <= 0xDE) return cp + 0x20;
 
-    /* Latin Extended-A: even → odd for 0x100-0x176 */
-    if (cp >= 0x100 && cp <= 0x176 && (cp & 1) == 0) return cp + 1;
+    /* Latin Extended-A.  Reported by matrix (github.com/matrix) in hpcfg's
+     * README.  The even-is-uppercase run is NOT continuous: it holds
+     * to U+0137, breaks at U+0138 (kra, lowercase with no pair), inverts for
+     * U+0139-U+0148 (L-acute through n-caron, where ODD is uppercase), breaks
+     * again at U+0149, then resumes at U+014A.  A single parity test is wrong
+     * for 18 of the 120 codepoints and does not merely fail to lower them: in
+     * the inverted run it maps a lowercase letter to a DIFFERENT letter --
+     * Polish l-stroke to N-acute, l-acute to L-cedilla.  Polish, Slovak,
+     * Czech and Latvian words are corrupted by it. */
+    if (cp >= 0x100 && cp <= 0x137 && (cp & 1) == 0) return cp + 1;
+    if (cp >= 0x139 && cp <= 0x148 && (cp & 1) == 1) return cp + 1;
+    if (cp >= 0x14A && cp <= 0x176 && (cp & 1) == 0) return cp + 1;
+    /* U+0130 I-with-dot lowercases to "i" plus a combining dot, which does not
+     * fit a codepoint-to-codepoint map.  Leave it alone rather than emit the
+     * dotless i: that is the Turkish-locale answer, and asserting it for every
+     * corpus is how a Turkish-only mapping leaks into German text. */
+    if (cp == 0x130) return cp;
 
     /* Cyrillic uppercase → lowercase (+0x20 for 0x0410-042F → 0x0430-044F) */
     if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
@@ -202,7 +261,11 @@ uint32_t utf8_to_upper(uint32_t cp) {
     if (cp >= 0xE0 && cp <= 0xF6) return cp - 0x20;
     if (cp >= 0xF8 && cp <= 0xFE) return cp - 0x20;
 
-    if (cp >= 0x101 && cp <= 0x177 && (cp & 1) == 1) return cp - 1;
+    /* Mirror of the to_lower runs; see the note there. */
+    if (cp >= 0x101 && cp <= 0x137 && (cp & 1) == 1) return cp - 1;
+    if (cp >= 0x13A && cp <= 0x148 && (cp & 1) == 0) return cp - 1;
+    if (cp >= 0x14B && cp <= 0x177 && (cp & 1) == 1) return cp - 1;
+    if (cp == 0x131) return cp;   /* dotless i: locale-dependent, leave it */
 
     if (cp >= 0x0430 && cp <= 0x044F) return cp - 0x20;
     if (cp >= 0x0450 && cp <= 0x045F) return cp - 0x50;

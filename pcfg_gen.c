@@ -118,7 +118,10 @@ static int apply_case_mask(const char *alpha, int alpha_bytelen,
         int n = utf8_decode(alpha + ai, alpha_bytelen - ai, &cp);
         if (n == 0) break;
         uint32_t mapped = (mask[mi] == 'U') ? utf8_to_upper(cp) : utf8_to_lower(cp);
-        oi += utf8_encode(out + oi, mapped);
+        /* Preserve the width the terminal was stored in: a single-byte
+         * terminal must generate single-byte candidates, or the guess
+         * carries different bytes from the password it was trained on. */
+        oi += utf8_encode_width(out + oi, mapped, n);
         ai += n;
         mi++;
     }

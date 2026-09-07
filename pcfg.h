@@ -245,6 +245,7 @@ extern volatile int Interrupted;
 /* UTF-8 */
 int      utf8_decode(const char *s, int len, uint32_t *cp);
 int      utf8_encode(char *buf, uint32_t cp);
+int      utf8_encode_width(char *buf, uint32_t cp, int srcwidth);
 int      utf8_cplen(const char *s, int bytelen);
 int      utf8_is_alpha(uint32_t cp);
 int      utf8_is_upper(uint32_t cp);

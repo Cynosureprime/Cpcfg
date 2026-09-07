@@ -260,7 +260,7 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
                 uint32_t cp;
                 int n = utf8_decode(val + si, vlen - si, &cp);
                 if (n == 0) break;
-                li += utf8_encode(lowered + li, utf8_to_lower(cp));
+                li += utf8_encode_width(lowered + li, utf8_to_lower(cp), n);
                 si += n;
             }
             lowered[li] = '\0';

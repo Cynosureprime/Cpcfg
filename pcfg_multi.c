@@ -90,7 +90,7 @@ void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
             /* Insert lowered UTF-8 bytes into trie */
             uint32_t lcp = utf8_to_lower(cp);
             char enc[4];
-            int elen = utf8_encode(enc, lcp);
+            int elen = utf8_encode_width(enc, lcp, cpn);
             for (int b = 0; b < elen; b++) {
                 unsigned char c = (unsigned char)enc[b];
                 if (c < TRIE_CHILDREN) {
@@ -128,7 +128,7 @@ static int trie_get_count(MultiWordTrie *mw, const char *word, int len) {
         if (n == 0) break;
         uint32_t lcp = utf8_to_lower(cp);
         char enc[4];
-        int elen = utf8_encode(enc, lcp);
+        int elen = utf8_encode_width(enc, lcp, n);
         for (int b = 0; b < elen; b++) {
             unsigned char c = (unsigned char)enc[b];
             if (c >= TRIE_CHILDREN || !cur->children[c])

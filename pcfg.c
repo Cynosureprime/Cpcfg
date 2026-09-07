@@ -3,12 +3,35 @@
  *
  * C reimplementation of pcfg-go (cyclone-github/pcfg-go)
  *
+ * Training is byte-faithful.  The hash covers bytes, so a terminal is stored
+ * in the encoding it arrived in: a CP1252 corpus trains to CP1252 terminals
+ * and a UTF-8 one to UTF-8, and neither is silently transcoded into the
+ * other.  Keyboard walks are matched by codepoint over eleven layouts, so a
+ * national-layout run is found whichever of those two encodings carries it.
+ *
  * Usage:
  *   pcfg -t <wordlist> <rules_dir>     Train on passwords
  *   pcfg -g <rules_dir>                Generate guesses
  *
- * $Revision: 1.19 $
+ * $Revision: 1.20 $
  * $Log: pcfg.c,v $
+ * Revision 1.20  2026/09/07 17:45:47  dlr
+ * Version 1.20: byte-faithful training, and keyboard walks that know more than one keyboard.
+ *
+ * utf8_decode never checked continuation bytes, so a lead-byte pattern alone chose a multi-byte branch and swallowed the characters after it: CP1252 k-oumlaut-ln1964 decoded as one codepoint spanning four bytes. 56 of the 128 high bytes take a multi-byte branch that way, which is the whole accented Latin-1 range, so a single-byte corpus was destroyed rather than misread. That matters because pass.len256 is 24 G and 98.8 percent single-byte. Continuations are validated, overlong forms rejected, and an ill-formed byte yields itself as a codepoint, which is what Latin-1 and CP1252 mean by it.
+ *
+ * Re-encoding then had to stop widening those bytes: a single-byte terminal written back as two UTF-8 bytes is a different password. utf8_encode_width preserves the arrival width through training, the multiword trie and generation.
+ *
+ * Latin Extended-A is three parity runs, not one. 18 of 120 codepoints were mapped wrongly and in the inverted run a lowercase letter became a different letter, Polish l-stroke to N-acute. utf8_is_upper carried the same wrong parity, so the two faults cancelled and neither was visible alone.
+ *
+ * The year pass tested one byte and wrote four, leaving keyboard terminals shorter than the four keys detection requires. Adjacent walks merged into one rare terminal instead of the several common ones actually typed.
+ *
+ * Keyboard tables were byte-indexed at 128 entries, so every key that is not ASCII was dropped: n-tilde, c-cedilla, a-ring, o-diaeresis, sterling, eszett and the whole Cyrillic alphabet. JCUKEN held one row. Keys are now codepoints across Latin-1, Latin Extended-A and Cyrillic, with UK, Spanish, Portuguese, Nordic, Turkish-Q and Brazilian ABNT2 added. The two-type filter classified by byte, so a Russian home-row run scored two types and its English equivalent one; it also refused symbol-only runs, which is what a shifted number row is. Classification is by codepoint, symbol-only runs are accepted, and a single-type run needs six keys and a non-US key among them. That last condition is measured: without it 60,000 dictionary words yielded 20 false terminals including desert, which really is six adjacent QWERTY keys. With it, zero.
+ *
+ * Three of the six were reported by matrix (github.com/matrix) in the hpcfg README: the Latin Extended-A runs, the year overwrite and the walk merge. The other three were found while confirming them.
+ *
+ * ASCII training is unchanged: same 101 structures and a byte-identical 50,000-candidate stream.
+ *
  * Revision 1.19  2026/08/30 16:45:45  dlr
  * Version 1.19: OMEN fixes in pcfg_train.c and pcfg_save.c.
  *
@@ -82,7 +105,7 @@
  * release tag must equal this revision, the same rule mdxfind and procrule
  * follow via their $Header strings.
  */
-static char rcsid[] = "$Header: /Users/dlr/src/mdfind/RCS/pcfg.c,v 1.19 2026/08/30 16:45:45 dlr Exp dlr $";
+static char rcsid[] = "$Header: /Users/dlr/src/mdfind/RCS/pcfg.c,v 1.20 2026/09/07 17:45:47 dlr Exp dlr $";
 
 static const char *pcfg_version(void)
 {

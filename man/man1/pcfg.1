@@ -1,6 +1,15 @@
 .\" pcfg(1) -- man-macro reference page
-.\" $Revision: 1.3 $
+.\" $Revision: 1.4 $
 .\" $Log: pcfg.1,v $
+.\" Revision 1.4  2026/09/07 17:52:50  dlr
+.\" Document 1.20: text encoding, case mapping and keyboard walks.
+.\"
+.\" No new options; every change is behavioural, so this is accuracy rather than new entries. Three sections added. TEXT ENCODING states the user-facing rule first, that a CP1252 corpus trains to CP1252 terminals and a UTF-8 one to UTF-8 with no silent transcode, then the mechanism and what was wrong before. CASE MAPPING gives the three Latin Extended-A parity runs and notes that the inverted run produced a different letter rather than merely failing to lower one. KEYBOARD WALKS names the eleven layouts, the codepoint keying that lets one table match either encoding, and the acceptance rule with the measurement behind it.
+.\"
+.\" The K terminal number is a byte length, not a key count, which the examples in the text would otherwise be read as contradicting once a walk is multi-byte: an eight-key Cyrillic walk in UTF-8 is a K16. Stated explicitly.
+.\"
+.\" HISTORY credits matrix (github.com/matrix) for the Latin Extended-A runs, the year overwrite and the walk merge, all named in the hpcfg README before they were found here.
+.\"
 .\" Revision 1.3  2026/08/29 17:52:49  dlr
 .\" Correct two versions that my own source changes made stale.
 .\"
@@ -23,7 +32,7 @@
 .\" Revision 1.1  2026/08/29 17:16:18  dlr
 .\" Initial revision: pcfg(1) man page. All 20 getopt options verified against the switch in pcfg.c. Documents the five modes, the training and generation option sets, and an OVERLOADED OPTIONS section for -n and -a, which mean different things per mode. Records that -a always requires an argument in both modes because it is declared a: even though the built-in help shows it as a bare flag for generation, so the documented generation form fails; supply an ignored value. Records -r as an undocumented alias for -g, and -h and -V as absent from the help. BUILDING notes that pcfg is the first Makefile target so a bare make builds it despite there being no all target.
 .\"
-.TH PCFG 1 "2026-08-29" "pcfg 1.18" "Password Recovery"
+.TH PCFG 1 "2026-09-07" "pcfg 1.20" "Password Recovery"
 .SH NAME
 pcfg \- probabilistic context-free grammar password generator
 .SH SYNOPSIS
@@ -65,6 +74,15 @@ Generation then walks that grammar most-probable-first.
 It is a C reimplementation of pcfg-go, and it complements rule-based
 generation rather than replacing it.  Rules encode what a human analyst
 noticed; a grammar encodes what the training corpus actually contains.
+.PP
+Training reads the corpus as bytes and stores each terminal in the encoding
+it arrived in; keyboard walks are matched by codepoint across eleven
+layouts.  See
+.BR "TEXT ENCODING" ,
+.B "CASE MAPPING"
+and
+.BR "KEYBOARD WALKS" ,
+all of which changed behaviour in 1.20.
 .PP
 Every mode reads or writes a
 .I grammar directory
@@ -205,6 +223,107 @@ The version is the RCS revision of
 not a separately maintained number, so it always names the source that built
 the binary. It was a hand-maintained constant until 1.18, and had drifted: the
 source read 1.05 while the shipped binary reported 1.04.
+.SH "TEXT ENCODING"
+Training is byte-faithful.  A hash covers bytes, so a terminal is stored in
+the encoding it arrived in: a CP1252 corpus trains to CP1252 terminals and a
+UTF-8 corpus to UTF-8 terminals, and neither is silently transcoded into the
+other.  Nothing has to be declared and no conversion is offered; this matters
+because real corpora are split by encoding, and a 24 GB list that is 98.8%
+single-byte has to train as single-byte.
+.PP
+The decoder validates continuation bytes and rejects overlong forms.  A byte
+that is not part of a well-formed UTF-8 sequence yields itself as a
+codepoint, which is the correct reading for Latin-1 and CP1252: in the
+0xA0\-0xFF range the byte value is the codepoint.  Re-encoding preserves the
+width the character arrived in, through training, the multiword trie and
+generation, so a single-byte terminal is written back as one byte rather
+than widened into two.
+.PP
+Neither held before 1.20.  A lead-byte pattern alone selected a multi-byte
+branch, without checking that continuations followed, so CP1252
+.B $HEX[6bf66c6e31393634]\&
+\(em Cologne with an o-diaeresis, followed by a year \(em decoded as a
+single codepoint spanning four bytes, swallowing the characters after the
+accent.  56 of the 128 high bytes take a multi-byte branch that way, which
+is the whole accented Latin-1 range, so a single-byte corpus was destroyed
+rather than merely misread.  Re-encoding then widened such a byte back into
+two UTF-8 bytes, which changes the string and therefore the digest: a
+terminal trained that way could never match the hash it came from.
+.SH "CASE MAPPING"
+Case is classified and mapped per codepoint.  Latin Extended-A
+(U+0100\-U+017F) is not a single parity run: even-is-uppercase holds to
+U+0137, inverts for U+0139\-U+0148, and resumes at U+014A.  One parity test
+across the block is wrong for 18 of the 120 codepoints, and in the inverted
+run it does not merely fail to change case \(em it maps a lowercase letter
+to a different letter, Polish l-stroke to N-acute.  Polish, Slovak, Czech
+and Latvian corpora were affected.  Corrected in 1.20.
+.PP
+U+0130 and U+0131, the Turkish dotted and dotless I, are deliberately left
+unmapped.  Their case rule is locale-specific, and asserting it for every
+corpus is how a Turkish-only mapping leaks into German text.
+.SH "KEYBOARD WALKS"
+A walk is a run of at least four keys adjacent on some layout, where
+adjacent means the row and the column each differ by no more than one.
+Eleven layouts are tried: QWERTY-US, QWERTY-UK, QWERTZ-DE, AZERTY-FR,
+Dvorak, JCUKEN-RU, QWERTY-ES, QWERTY-PT, QWERTY-Nordic, QWERTY-TR and
+QWERTY-BR (ABNT2).  A detected walk becomes a
+.B K
+terminal numbered by its length in bytes.
+.PP
+Keys are codepoints, not bytes.  The keys that identify a national layout
+are the ones that are not ASCII \(em n-tilde, c-cedilla, a-ring,
+o-diaeresis, sterling, eszett and the whole Cyrillic alphabet \(em and the
+128-entry byte-indexed tables used before 1.20 could hold none of them.
+JCUKEN held only its digit row and could never match a Cyrillic walk at all.
+Because a raw 0xF1 and the two-byte UTF-8 form both decode to U+00F1, one
+codepoint table matches a walk in either encoding.
+.PP
+A run is accepted when it carries at least two character types \(em alpha,
+digit, special \(em classified by codepoint.  Classifying by byte, as
+releases before 1.20 did, counted every Cyrillic and accented letter as
+special, so a Russian home-row run scored two types and passed while its
+English equivalent scored one and failed: the same string was a walk or not
+according to its alphabet.  Two further cases are admitted:
+.TP
+.B "Symbol-only runs"
+A run with no letter and no digit is a shifted number row, which is exactly
+what the old rule refused.  Accepted at the shared four-key minimum:
+adjacency has already done the discriminating, since arbitrary punctuation
+is not adjacent and a character is not adjacent to itself, so a run of
+repeats cannot reach the test.
+.TP
+.B "Single-type runs"
+Six or more keys, and at least one key that is not on a US board.  The
+second condition is measured, not assumed: without it, 60,000 dictionary
+words yielded 20 false terminals, among them
+.BR desert ,
+which really is six adjacent QWERTY keys.  With it, zero.
+.PP
+Pure-ASCII runs such as
+.B qwertyuiop
+and
+.B asdfghjkl
+are therefore still not walks, deliberately.  A short list of look-alike
+words is excluded outright as well.
+.PP
+Years and walks no longer collide.  The year pass tested one byte and wrote
+four, overwriting whatever an earlier pass owned:
+.B 2009ol.\&
+tagged the trailing four characters as a walk, the year then claimed 2009
+and took the 9 with it, and what remained was a three-byte keyboard
+terminal \(em a
+.BR K3 ,
+which detection can never produce, because it requires four keys.  All four
+bytes must now be untagged.
+Adjacent walks are also kept apart:
+.B 1qaz2wsx3edc
+records the three common terminals
+.BR 1qaz ,
+.B 2wsx
+and
+.BR 3edc ,
+rather than merging into a single rare
+.BR K12 .
 .SH BUILDING
 .B pcfg
 is the first target in its Makefile, so a bare
@@ -272,6 +391,24 @@ Combine grammars trained on two different corpora:
 pcfg \-M grammar.a \-M grammar.b \-g grammar.merged
 .fi
 .RE
+.SH HISTORY
+The Latin Extended-A case runs, the year pass overwriting an earlier tag,
+and the merging of adjacent keyboard walks were reported by matrix
+(github.com/matrix) in the README of hpcfg:
+.PP
+.RS
+.nf
+https://github.com/matrix/hpcfg
+.fi
+.RE
+.PP
+The remaining 1.20 corrections \(em UTF-8 continuation validation,
+width-preserving re-encoding, codepoint-keyed layout tables and the walk
+acceptance rule \(em were found here while confirming those.
+.PP
+ASCII training is unchanged by all of this, and was checked rather than
+assumed: the same 101 base structures and a byte-identical 50,000-candidate
+stream.
 .SH "SEE ALSO"
 .BR mdxfind (1),
 .BR procrule (1),

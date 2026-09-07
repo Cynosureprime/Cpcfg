@@ -156,6 +156,7 @@ void build_base_structure(Section *sects, int nsects, char *out, int outlen) {
 #define TAG_KBD    3
 #define TAG_EMAIL  4
 #define TAG_WEB    5
+#define TAG_KBD1   6   /* first byte of a walk; see phase 1a and phase 2 */
 
 /* Declare keyboard walk detection from pcfg_keyboard.c */
 typedef struct { int start; int len; } KbdWalk;
@@ -302,9 +303,17 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
     /* Phase 1a: Keyboard walks */
     KbdWalk walks[16];
     int nwalks = detect_keyboard_walks(pw, pwlen, walks, 16);
+    /* Reported by matrix (github.com/matrix) in hpcfg's README.
+     * Mark where each walk BEGINS.  Phase 2 used to collect a run of TAG_KBD
+     * and emit it as one section, so two adjacent walks merged: 1qaz2wsx3edc
+     * became a single rare K12 instead of the three common terminals 1qaz,
+     * 2wsx and 3edc.  Adjacent walks are the normal case -- that is how the
+     * pattern is typed -- so the merge cost the frequent terminals and
+     * manufactured a rare one. */
     for (int w = 0; w < nwalks; w++) {
         for (int j = walks[w].start; j < walks[w].start + walks[w].len; j++)
             tag[j] = TAG_KBD;
+        tag[walks[w].start] = TAG_KBD1;
     }
 
     /* Phase 1b: Email detection (only on untagged regions) */
@@ -336,7 +345,17 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
 
     /* Phase 1d: Years (19XX/20XX) */
     for (int j = 0; j + 3 < pwlen; j++) {
-        if (tag[j] != TAG_NONE) continue;
+        /* Reported by matrix (github.com/matrix) in hpcfg's README.
+         * All four bytes must be free, not just the first.  Testing tag[j] and
+         * then writing tag[j..j+3] overwrote whatever an earlier pass owned:
+         * "2009ol." tagged 9ol. as a walk, the year then claimed 2009 and took
+         * the '9' with it, leaving "ol." as a three-byte keyboard terminal --
+         * a K3, which detect_keyboard_walks can never produce because it
+         * requires four.  The website pass below already does it this way. */
+        int yfree = 1;
+        for (int k = 0; k < 4; k++)
+            if (tag[j+k] != TAG_NONE) { yfree = 0; break; }
+        if (!yfree) continue;
         if ((pw[j] == '1' && pw[j+1] == '9') ||
             (pw[j] == '2' && pw[j+1] == '0')) {
             if (pw[j+2] >= '0' && pw[j+2] <= '9' &&
@@ -382,8 +401,11 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
             while (i < pwlen && tag[i] == TAG_CTX) i++;
             set_section_str(&sects[nsects], &pw[start], i - start, "X1", 1);
             nsects++;
-        } else if (tag[i] == TAG_KBD) {
+        } else if (tag[i] == TAG_KBD1 || tag[i] == TAG_KBD) {
+            /* One section per walk: consume this walk's first byte, then its
+             * continuation bytes, and stop at the next walk's first byte. */
             int start = i;
+            i++;
             while (i < pwlen && tag[i] == TAG_KBD) i++;
             set_section(&sects[nsects], &pw[start], i - start, 'K', i - start);
             nsects++;
