@@ -294,6 +294,44 @@ Key optimizations:
 - Inline integer-to-ASCII for probability output (no `snprintf`)
 - Single-pass file reading (no rewind)
 
+## Companion tool: `tools/stylegen`
+
+Some passwords were never typed. They were pasted, from a "fancy text
+generator" website, and no case or mangling rule can produce them:
+
+```
+Ｐａｓｓｗｏｒｄ    pɹoʍssɐd    p̲a̲s̲s̲w̲o̲r̲d̲    𝙃𝙚𝙣𝙧𝙞𝙦𝙪𝙚20
+```
+
+Mathematical Alphanumeric characters have **no Unicode case mappings**, so
+`c`, `u`, `l`, `C` and `t` are identity transforms on them. A grammar trained
+on such a plaintext learns the styled byte sequence, which is a one-off, rather
+than the base word, which is reusable.
+
+`stylegen --unstyle` is the normaliser for that, and it is why the tool ships
+here:
+
+```sh
+stylegen --unstyle founds.txt | pcfg -t stdin -g grammar
+```
+
+It undoes the compatibility substitution and **keeps combining marks**, so
+`𝙃𝙚𝙣𝙧𝙞𝙦𝙪𝙚` becomes `Henrique` while `Muñoz` keeps its `ñ`. That distinction
+matters because the hash covers bytes: `Munoz` and `Muñoz` are different
+passwords with different digests, so a grammar trained on a deaccented form can
+never generate the accented one.
+
+`--strip` is the destructive variant — it also drops combining marks, which is
+what you want for Zalgo (`p͞é͜ng̸u̡͘iń͢͞k̴è͢͜e̛p͠è͢r` → `penguinkeeper`), since Zalgo is
+randomised mark injection and is not enumerable at any scale.
+
+Run without a mode it generates styled variants instead, for use as candidates.
+The productive base list there is names and handles rather than dictionary
+words: no keyboard layout emits U+1D643, so these arrive by paste, typically
+from a social-media display name.
+
+See `man stylegen` for the full option set and the per-script coverage.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
@@ -303,5 +341,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 - [pcfg_cracker](https://github.com/lakiw/pcfg_cracker) by Matt Weir — the original PCFG password research toolkit
 - [pcfg-go](https://github.com/cyclone-github/pcfg-go) by cyclone — Go reimplementation
 - [hashcat PCFG](https://github.com/matrix/hashcat/tree/pcfg_ahf_v1.0) by matrix — admission filter and junk detection concepts
+- [hpcfg](https://github.com/matrix/hpcfg) by matrix — reported three defects fixed in 1.20: the Latin Extended-A case parity runs, the year pass overwriting an earlier pass, and adjacent keyboard walks merging into a single terminal
 - [yarn.c](http://www.zlib.net/) by Mark Adler — threading library
 - [Judy arrays](http://judy.sourceforge.net/) — high-performance associative arrays

@@ -56,12 +56,26 @@ pcfg: $(OBJS)
 clean:
 	rm -f pcfg $(OBJS)
 
-.PHONY: clean
+.PHONY: clean install install-bin install-man install-tools
 
 # Man pages. Source only -- man renders per terminal width, locale and
 # encoding, and every packager expects roff and compresses it itself.
 PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man
+
+install: install-bin install-tools install-man
+
+install-bin: pcfg
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 pcfg $(DESTDIR)$(BINDIR)/
+
+# tools/stylegen is a Python 3 script, not a build product, so it is installed
+# rather than compiled and `make` does not depend on it. It has to keep running
+# on Python 3.4.3, which is what the oldest machine carrying the corpora runs.
+install-tools:
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 tools/stylegen $(DESTDIR)$(BINDIR)/
 
 install-man:
 	install -d $(DESTDIR)$(MANDIR)/man1

@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+#
+# $Revision: 1.7 $
+#
+# $Log: stylegen,v $
+# Revision 1.7  2026/09/07 17:12:24  dlr
+# Add --unstyle: undo the styling without deaccenting.
+#
+# --strip does two separable jobs in one pass. It compatibility-decomposes, which undoes the styled substitution, and then drops every combining mark, which deaccents and de-Zalgos. The second half is destructive for a PCFG trainer: Munoz and Munoz-with-tilde are different passwords with different digests, so a grammar trained on the stripped form learns a terminal it can never turn back into the password it came from. WORD-PATTERNS records the same rule for wordlists - a non-ASCII password is a concept with several byte representations, and the hash depends on the bytes.
+#
+# --unstyle decomposes and then RECOMPOSES with NFC, so the styled substitution is undone and an accent returns to the single codepoint it arrived as. Henrique comes back from the sans-serif bold italic form and Munoz keeps its c3 b1. Feed this to the trainer and keep --strip for the Zalgo case, where dropping marks is the whole point.
+#
+# --strip output is byte-identical to 1.6, as is styling output in the default mode.
+#
+# Revision 1.6  2026/09/07 13:46:06  dlr
+# Use binascii.hexlify rather than bytes.hex(): --hex never worked on the corpus hosts. bytes.hex() is Python 3.5 and later. gp.bungi.com runs 3.4.3, so every non-ASCII candidate under --hex raised AttributeError: bytes object has no attribute hex. The file compiles there and every other mode runs, so this failed only on the one flag that exists to make output safe for a password corpus, and only on the host that holds the wordlists. Not a regression from 1.5 - 1.4 and earlier fail identically, so --hex has never worked on that box. The docstring already states that this file must keep working on the oldest machine carrying the corpora, and ord(d) < 128 is used in derive_styles() in place of str.isascii() for exactly that reason; this is the same constraint applied to the one call that missed it. binascii.hexlify(b).decode(ascii) is available on every 3.x. Output is byte-identical to 1.5 on a host where 1.5 could run at all. Verified on gp Python 3.4.3: --hex on non-ASCII, --hex on invalid bytes, plain mode on invalid bytes, $HEX[] input, korean nfd, arabic_isolated, -s stats and --list all correct.
+#
+# Revision 1.5  2026/09/07 13:42:14  dlr
+# encode() encoded without surrogateescape and died on any real password corpus. The read path decodes with surrogateescape and both write paths encode with it, but encode() - which decides whether output needs $HEX[] wrapping - called s.encode(utf-8) bare. A byte sequence that is not valid UTF-8 arrives as a lone surrogate and that call raises UnicodeEncodeError on it. Such lines are legitimate and common: passwords are bytes rather than text, which is the entire reason $HEX[] exists. Measured on a 547041-line corpus carrying 217 non-UTF-8 entries, the rate reported from a real wordlist: 1.4 exits 1 and 1.5 completes. The loss is worse than the tail of the run, because Python buffers stdout and the exception discards the buffer rather than flushing it - with a single bad line at position 300000 of 547041, 1.4 emitted 300000 of 547041 output lines and lost 45 percent; with a bad line first it emitted nothing at all. One argument fixes it, matching what the read and write paths already do. Round-tripping the escape here also means the $HEX[] branch wraps the ORIGINAL bytes rather than a mangled re-encoding: a raw 0xf6 now survives inline through a styled candidate, byte-exact in plain mode and hex-wrapped under --hex, with no raw invalid byte escaping in that mode. Output for valid UTF-8 input is byte-identical to 1.4 across all styles. This is the same shape as the defect fixed in 1.2 - the read path was made byte-safe and one call was left behind - which suggests the rule worth stating is that every encode and decode in this file takes surrogateescape, without exception.
+#
+# Revision 1.4  2026/09/07 12:41:16  dlr
+# Support non-Latin scripts: normalisation styles, enclosing marks, and alphabets derived by compatibility decomposition tag. The 15 substitution styles come from the Mathematical Alphanumeric block, which is Latin and Greek only, so every other script got 5 of 20 styles - four combining overlays and flip, and flip only reverses since it has no turned glyphs outside ASCII. Three additions, all derived from the Unicode database rather than hand-typed. nfc and nfd: same glyphs, different bytes, and the hash covers bytes. Korean gains most, since an is U+C548 at three bytes and decomposes to three jamo and nine; Japanese and Vietnamese move too, while scripts with no composed form return the input and are dropped as identity. enclose_circle and enclose_square: combining enclosing marks apply to any base character, so they are the only way to circle a word in a script with no block of its own. And derive_compat_styles(), which asks WHY a character decomposes rather than whether it reduces to ASCII: isolated, initial, medial and final are the Arabic positional forms, narrow the halfwidth katakana, compat the Hangul jamo, font the Greek mathematical letters. Hangul needs a decompose-then-map kind because its mappings target jamo while text is written in precomposed syllables. That kind returns the input unchanged when the alphabet substituted nothing, because otherwise a Japanese word emitted the same string three times under nfd, hangul_compat and hangul_circle - NFD wearing a script label, which is the pass-through the identity rule exists to remove. Coverage rises from 5 styles to: Arabic 12, Korean 10, Japanese 10, Chinese 7, Cyrillic 7; ASCII 20 to 22. Chinese, Cyrillic, Hebrew and Devanagari have no substitution alphabet in Unicode at all and the docstring now says so. Latin output byte-identical to 1.3 across the pre-existing styles; no duplicate output lines for any script tested.
+#
+# Revision 1.3  2026/09/07 12:08:10  dlr
+# Suppress identity output by default, style with str.translate, add -s stats and --label. A style with no glyph for the script it is handed returns the word unchanged, so all 15 substitution styles pass an Arabic, Cyrillic, Devanagari or Hebrew word straight through. Measured: 75 percent of the output for any non-Latin base word was an exact copy of the input, and on a 94 percent non-Latin base that is 800000 output lines against 237500 real ones. A run built on that is three-quarters a plain dictionary attack wearing a costume, which is why its hits are all unstyled words already solved. Identity is now dropped; --keep-identity restores the old behaviour. This matches procrule, which never emits its source word, and the caller supplies the base list either way. apply_style now uses str.translate over a table built once in build(), rather than a dict lookup per character per style: 3.2x on the substitution styles measured in isolation, 1.7x end to end on a 40000-word non-Latin corpus. The combining styles use arg.join(word) + arg, which is the same string. Neither changes output: with --keep-identity the result is byte-identical to 1.2 across all 20 styles over 400000 lines. Note the saving from suppression is in emission and downstream consumption, not in styling - the style still has to be applied to discover it is the identity - so generation gains 1.7x while the candidate stream loses 70 percent of its volume, and that second number is the one the attack sees. -s reports per-style emitted and suppressed counts on stderr, which is what makes a pointless arm visible before it is run rather than after. --label prefixes each candidate with its style and a TAB so a hit can be attributed without reconstruction. Documented that a canary used to gate a run must be Latin or ASCII: a non-Latin canary styles to itself, is suppressed as identity, and aborts a healthy run.
+#
+# Revision 1.2  2026/09/07 12:02:10  dlr
+# Decode $HEX[] on input. Every other tool in this chain treats $HEX[] as an input encoding - mdxfind consumes it natively, pack2 decodes it on input, and rehex -u exists for nothing else - and the corpora depend on that: hashmob.net_*.found and hashpwn.txt carry no raw high bytes at all, so every foreign word in them arrives wrapped. stylegen read the wrapper as the word and styled that, so $HEX[4dc3bc6c6c6572] produced the turned form of the literal text rather than of Mueller. The output looked plausible, which is the failure mode this toolchain keeps producing: a result that cannot be told from a correct one. Both input read sites now go through read_word(), which unwraps a well-formed $HEX[...] line and otherwise returns the line as before. A malformed payload - non-hex, odd length, unterminated - falls through and is styled literally, because that is what it is. The ASCII-payload case matters as much as the foreign one, since a large share of $HEX[] plaintexts are pure ASCII wrapped only for a colon; $HEX[7061737377643a31] now styles as passwd:1. Verified byte-identical output to 1.1 across all 20 styles for non-$HEX input, with and without --hex.
+#
+# Revision 1.1  2026/09/07 11:56:28  dlr
+# Initial revision
+#
+#
+"""
+stylegen - generate "fancy text generator" styled variants of candidate words.
+
+Replicates what the lingojam/fancytextguru-class websites do: a whole-string
+codepoint substitution, with unmapped characters passing through unchanged.
+That pass-through is the point - it is why 'Henrique20' styles to
+'Henrique20' with the digits still ASCII, since the sans-serif bold
+italic block has no digits.  A real solved hash from that family:
+
+    b91cb86bee9ec2afe401fb3caf37807b1e011449:Henrique20
+
+None of these are typable at a login prompt.  No keyboard layout emits
+U+1D643, and macOS Unicode Hex Input is BMP-only (four hex digits), so it
+cannot enter one at all.  They arrive by paste, which means the productive
+base list is names and handles - the sort of thing people set as a social
+media display name - not general dictionary words.
+
+The alphabet tables are DERIVED FROM THE UNICODE DATABASE at import time,
+not hand-typed: every styled letter NFKD-normalises back to its ASCII
+original, so scanning for that recovers the mapping exactly.  This matters
+because the Mathematical Alphanumeric block has reserved holes where letters
+are borrowed from the BMP - SCRIPT CAPITAL B is U+212C, not U+1D49D, and
+naive base+offset arithmetic silently emits non-characters there.
+
+NON-LATIN SCRIPTS.  The 15 substitution styles come from the Mathematical
+Alphanumeric block, which is Latin and Greek only, so every other script used
+to get 5 of 20 styles -- four combining overlays and flip, and flip merely
+reverses since it has no turned glyphs outside ASCII.  Three additions widen
+that, all derived from the Unicode database rather than hand-typed:
+
+  * nfc / nfd.  Same glyphs, different BYTES, and the hash covers bytes.
+    Korean gains the most: an is U+C548, three bytes, decomposing to three
+    jamo and nine.  Japanese and Vietnamese move too.  Scripts with no
+    composed form return the input and are dropped as identity.
+  * enclose_circle / enclose_square.  Combining enclosing marks apply to any
+    base character, so they are the only "circle a word" styles available to
+    scripts with no block of their own.
+  * Alphabets derived by compatibility DECOMPOSITION TAG rather than by
+    "does this reduce to ASCII": <isolated>/<initial>/<medial>/<final> are
+    the Arabic positional forms, <narrow> the halfwidth katakana, <compat>
+    the Hangul jamo, <font> the Greek mathematical letters.
+
+  Coverage after this, styles that emit anything:
+      ASCII 22, Arabic 12, Korean 10, Japanese 10, Chinese 7, Cyrillic 7
+
+  CHINESE, CYRILLIC, HEBREW AND DEVANAGARI HAVE NO SUBSTITUTION ALPHABET IN
+  UNICODE AT ALL.  The 55 circled CJK ideographs are numerals and markers,
+  not letters; Cyrillic offers three superscripts.  For those scripts the
+  honest set is the overlays, the enclosing marks, nfc/nfd and flip -- and
+  saying so here is cheaper than discovering it from a run that returns
+  nothing but the words you fed it.
+
+IDENTITY OUTPUT IS SUPPRESSED BY DEFAULT.  A style that has no glyph for the
+script it is handed returns the word unchanged: Arabic, Cyrillic, Devanagari
+and Hebrew all pass through all 15 substitution styles untouched, so 75% of
+the output for a non-Latin base word is an exact copy of the input.  Measured
+on a 94%-non-Latin base, that is 800,000 output lines falling to 237,500 -- and
+a run whose hits are then all unstyled words you already had, a dictionary
+attack wearing a costume.  procrule follows the same convention and never
+emits its source word; the caller supplies the base list either way.  Pass
+--keep-identity for the old behaviour.
+
+  CANARY WARNING.  If you gate a run by grepping the generated stream for a
+  known plaintext, that canary MUST be a word the styles can actually
+  transform -- Latin or ASCII.  A non-Latin canary styles to itself, is
+  suppressed as identity, and the gate then aborts a perfectly healthy run.
+
+Usage:
+    stylegen --list
+    stylegen [--styles S[,S...]] [--hex] [--no-digits] [--keep-identity]
+             [--label] [-s] [words.txt ...]
+    stylegen --strip [--hex] [words.txt ...]
+
+Reads words on stdin (or from files), writes styled variants on stdout.
+"""
+import sys, re, argparse, binascii, unicodedata as ud
+from collections import defaultdict
+
+# Letters whose Unicode NAME does not carry their style word.
+_SPECIAL = {0x210E: ('ITALIC', 'h'), 0x212F: ('SCRIPT', 'e'),
+            0x210A: ('SCRIPT', 'g'), 0x2134: ('SCRIPT', 'o')}
+# Style names that are the same style under a different word.  The keys are
+# what survives _STRIP, not the raw Unicode name: BLACK-LETTER CAPITAL C
+# reduces to 'BLACK-' because _STRIP eats the word LETTER (the hyphen is a
+# word boundary).  Those five capitals are fraktur's borrowed BMP letters.
+_ALIAS = {'BLACK-': 'FRAKTUR', 'BLACK-LETTER': 'FRAKTUR'}
+_STRIP = re.compile(r'\b(MATHEMATICAL|CAPITAL|SMALL|LETTER|DIGIT|LATIN)\b')
+_TAIL_L = re.compile(r'\s+[A-Z]$')
+_TAIL_D = re.compile(r'\s+(ZERO|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE)$')
+
+
+def derive_styles():
+    """Recover styled alphabets from the Unicode database via NFKD."""
+    styles = defaultdict(dict)
+    for cp in range(0x7F, 0x1FBFF):
+        ch = chr(cp)
+        try:
+            name = ud.name(ch)
+        except ValueError:
+            continue
+        d = ud.normalize('NFKD', ch)
+        # ord(d) < 128 rather than d.isascii(): str.isascii() is 3.7+, and the
+        # corpus hosts run 3.4.  Keep this file working on the oldest box that
+        # has the wordlists on it.
+        if len(d) != 1 or not (d.isalnum() and ord(d) < 128):
+            continue
+        if cp in _SPECIAL:
+            styles[_SPECIAL[cp][0]][d] = ch
+            continue
+        k = _TAIL_D.sub('', _TAIL_L.sub('', _STRIP.sub('', name)))
+        k = re.sub(r'\s+', ' ', k).strip()
+        styles[_ALIAS.get(k, k)][d] = ch
+    LO, UP = set('abcdefghijklmnopqrstuvwxyz'), set('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    return {k: v for k, v in styles.items()
+            if len(LO & set(v)) == 26 and len(UP & set(v)) == 26}
+
+
+# Styles that are not codepoint substitutions.
+# Scripts whose compatibility mappings are worth deriving, keyed by the word
+# their Unicode NAME starts with.  Everything else -- Chinese, Cyrillic,
+# Hebrew, Devanagari -- has no usable substitution alphabet at all: the 55
+# circled CJK ideographs are numerals and markers, not letters, and Cyrillic
+# offers three superscripts.  For those scripts the honest style set is the
+# combining overlays, the enclosing marks, normalisation and flip.
+_SCRIPTS = ('ARABIC', 'HANGUL', 'KATAKANA', 'HIRAGANA', 'GREEK')
+# Tags worth exposing.  'font' is the Greek half of the mathematical
+# alphanumerics; the four Arabic ones are positional forms.
+_TAGS = ('isolated', 'initial', 'medial', 'final', 'narrow', 'circle',
+         'compat', 'square', 'font')
+
+
+def derive_compat_styles():
+    """Styled alphabets for non-Latin scripts, by compatibility DECOMPOSITION TAG.
+
+    derive_styles() above asks "does this NFKD back to an ASCII letter", which
+    is Latin-only by construction.  The same database also records WHY a
+    character decomposes -- <isolated>, <final>, <narrow>, <circle> -- and for
+    Arabic those tags are exactly the positional forms, for Katakana the
+    halfwidth set, for Hangul the compatibility jamo.  Same derivation
+    discipline as the Latin path: nothing is hand-typed.
+    """
+    out = defaultdict(dict)
+    for cp in range(0x80, 0x110000):
+        ch = chr(cp)
+        d = ud.decomposition(ch)
+        if not d or not d.startswith('<'):
+            continue
+        tag = d.split('>')[0][1:]
+        if tag not in _TAGS:
+            continue
+        parts = d.split('> ')[1].split()
+        if len(parts) != 1:
+            continue
+        try:
+            base = chr(int(parts[0], 16))
+        except ValueError:
+            continue
+        try:
+            bname = ud.name(base)
+        except ValueError:
+            continue
+        for sc in _SCRIPTS:
+            if bname.startswith(sc):
+                out['%s_%s' % (sc.lower(), tag)].setdefault(base, ch)
+                break
+    # Drop alphabets too small to style a word with.
+    return {k: v for k, v in out.items() if len(v) >= 8}
+
+
+_SAMPLE = {'arabic': '\u0645\u0631\u062d\u0628\u0627',
+           'hangul': '\uc548\ub155',
+           'katakana': '\u30d1\u30b9\u30ef\u30fc\u30c9',
+           'hiragana': '\u3071\u3059\u308f',
+           'greek': '\u03ba\u03c9\u03b4\u03b9\u03ba'}
+_COMBINING = {'strikethrough': '\u0336', 'underline': '\u0332',
+              'overline': '\u0305', 'slash': '\u0338',
+              # Enclosing marks apply to ANY base character, unlike the
+              # circled/squared blocks which exist only for Latin.  These are
+              # the only "circle a word" styles available to Chinese, Cyrillic,
+              # Hebrew or Devanagari.
+              'enclose_circle': '\u20DD', 'enclose_square': '\u20DE'}
+_FLIP = str.maketrans(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789,.?!'\"()[]{}",
+    "ɐqɔpǝɟƃɥıɾʞןɯuodbɹsʇnʌ"
+    "ʍxʎz∀qƆpƎℲ⅁HIſʞ⅂WNO"
+    "ԀΌᴚS┴∩ΛMX⅄Z0ƖᄅƐㄣ"
+    "ϛ9ㄥ'6,˙¿¡,„)(][}{")
+
+
+def build(styles, want, style_digits=True, compat=None):
+    compat = compat or {}
+    out = []
+    for name in want:
+        key = name.upper().replace('_', ' ')
+        if name.lower() in ('nfc', 'nfd'):
+            out.append((name, ('norm', name.upper())))
+        elif name.lower() in compat:
+            # Hangul alphabets are jamo; the word must be decomposed first.
+            kind = 'dmap' if name.lower().startswith('hangul_') else 'map'
+            out.append((name, (kind, str.maketrans(compat[name.lower()]))))
+        elif key in styles:
+            m = dict(styles[key])
+            if not style_digits:
+                m = {k: v for k, v in m.items() if not k.isdigit()}
+            out.append((name, ('map', str.maketrans(m))))
+        elif name.lower() in _COMBINING:
+            out.append((name, ('comb', _COMBINING[name.lower()])))
+        elif name.lower() in ('flip', 'upsidedown'):
+            out.append((name, ('flip', None)))
+        else:
+            sys.exit("stylegen: unknown style %r (try --list)" % name)
+    return out
+
+
+def apply_style(word, kind, arg):
+    if kind == 'map':
+        # str.translate over a table built once in build(), not a Python-level
+        # dict lookup per character per style: measured 3.2x on this workload.
+        return word.translate(arg)
+    if kind == 'comb':
+        # Equivalent to ''.join(c + arg for c in word) -- join puts arg between
+        # every pair, the trailing one supplies the last.  Callers skip empty
+        # words, so the empty-input difference cannot arise.
+        return arg.join(word) + arg
+    if kind == 'flip':
+        return word.translate(_FLIP)[::-1]
+    if kind == 'norm':
+        # Same glyphs, different BYTES -- and the hash covers bytes.  Korean is
+        # the extreme case: an = U+C548, three bytes, decomposes to three jamo
+        # and nine bytes.  Japanese and Vietnamese move too.  Scripts with no
+        # composed form return the input and are dropped as identity.
+        return ud.normalize(arg, word)
+    if kind == 'dmap':
+        # Hangul compatibility mappings target JAMO, but text is written in
+        # precomposed syllables, so a direct map matches nothing.  Decompose
+        # first and the alphabet applies.
+        d = ud.normalize('NFD', word)
+        out = d.translate(arg)
+        # If the alphabet substituted nothing, this is NFD with a script label
+        # on it -- byte-identical to the nfd style, emitted under a name that
+        # claims a transformation that did not happen.  Hand back the input so
+        # the identity rule drops it.  Measured: without this a Japanese word
+        # emits the same string three times, as nfd, hangul_compat and
+        # hangul_circle.
+        return word if out == d else out
+
+
+_HEX_LINE = re.compile(r'^\$HEX\[([0-9a-fA-F]*)\]$')
+
+
+def read_word(raw):
+    """One input line as text, unwrapping $HEX[] if that is what it is.
+
+    Every other tool in this chain treats $HEX[] as an INPUT encoding --
+    mdxfind consumes it natively, pack2 decodes it on input, rehex -u exists
+    for nothing else -- and the corpora depend on that: hashmob.net_*.found
+    and hashpwn.txt carry no raw high bytes at all, so every foreign word in
+    them arrives wrapped.  Styling the wrapper instead of the word produced
+    output that looked plausible and was nonsense: $HEX[4dc3bc6c6c6572] used
+    to flip to the turned form of the literal text "$HEX[4dc3bc6c6c6572]"
+    rather than of Mueller.  A malformed or odd-length payload falls through
+    and is styled literally, because that is what it is.
+    """
+    line = raw.rstrip(b'\n')
+    if line[:5] == b'$HEX[' and line[-1:] == b']':
+        m = _HEX_LINE.match(line.decode('latin-1'))
+        if m:
+            try:
+                return bytes.fromhex(m.group(1)).decode('utf-8', 'surrogateescape')
+            except ValueError:
+                pass
+    return line.decode('utf-8', 'surrogateescape')
+
+
+def encode(s, hexout):
+    # surrogateescape, matching the read path and both write paths.  A byte
+    # sequence that is not valid UTF-8 arrives as a lone surrogate, and a bare
+    # encode() raises on it -- so this died on any real password corpus, where
+    # such lines are legitimate: passwords are bytes, not text, which is the
+    # whole reason $HEX[] exists.  Measured on one wordlist, 217 of 547,041
+    # entries.  Round-tripping the escape here also means the $HEX[] branch
+    # below wraps the ORIGINAL bytes rather than a mangled re-encoding.
+    b = s.encode('utf-8', 'surrogateescape')
+    if hexout:
+        try:
+            b.decode('ascii')
+        except UnicodeDecodeError:
+            # binascii.hexlify, not bytes.hex(): the latter is 3.5+ and the
+            # corpus hosts run 3.4.3, where --hex -- the flag that makes output
+            # safe for a password corpus -- raised AttributeError on every
+            # non-ASCII candidate.  The docstring already says this file must
+            # keep working on the oldest box holding the wordlists; this is
+            # what that costs.
+            return '$HEX[' + binascii.hexlify(b).decode('ascii') + ']'
+    return s
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument('--list', action='store_true')
+    ap.add_argument('--styles', default='all')
+    ap.add_argument('--hex', action='store_true',
+                    help='emit non-ASCII output as $HEX[...]')
+    ap.add_argument('--no-digits', action='store_true',
+                    help='never style digits, even where the block defines them')
+    ap.add_argument('--strip', action='store_true',
+                    help='INVERSE mode: recover the base word instead of styling. '
+                         'NFKD-normalises and drops combining marks, so styled and '
+                         'mark-decorated passwords collapse to what the human typed.')
+    ap.add_argument('--unstyle', action='store_true',
+                    help='INVERSE mode, marks PRESERVED: undo the compatibility '
+                         'substitution only. Recovers Henrique from the styled '
+                         'form but leaves Munoz spelled with its n-tilde, '
+                         'because the accent is part of the bytes the hash '
+                         'covered. This is the mode to feed a PCFG trainer.')
+    ap.add_argument('--keep-identity', action='store_true',
+                    help='also emit variants identical to the input word')
+    ap.add_argument('-s', '--stats', action='store_true',
+                    help='per-style emitted/suppressed counts on stderr at exit')
+    ap.add_argument('--label', action='store_true',
+                    help='prefix each candidate with its style and a TAB')
+    ap.add_argument('-h', '--help', action='store_true')
+    ap.add_argument('files', nargs='*')
+    a = ap.parse_args()
+    if a.help:
+        print(__doc__)
+        return 0
+
+    styles = derive_styles()
+    compat = derive_compat_styles()
+
+    if a.strip or a.unstyle:
+        # Zalgo-class decoration cannot be GENERATED - 13 characters carrying 0-3
+        # marks from an 11-mark pool is 1.4e41 combinations, and the full
+        # U+0300-U+036F block is 9.3e79.  It can, however, be UNDONE, which is
+        # what makes these passwords useful: they are intelligence about the base
+        # word, not targets.  p<marks>e<marks>ng... -> penguinkeeper.
+        # The same pass deaccents ordinary words (Munoz <- Munoz), which is a real
+        # candidate source in its own right, since people type the ASCII form.
+        files = a.files or ['-']
+        w = sys.stdout.buffer.write          # bytes, not locale-encoded text
+        for fn in files:
+            fh = sys.stdin.buffer if fn == '-' else open(fn, 'rb')
+            for raw in fh:
+                word = read_word(raw)
+                if not word:
+                    continue
+                if a.unstyle:
+                    # Compatibility-decompose to undo the styling, then
+                    # RECOMPOSE so a decomposed accent goes back to the single
+                    # codepoint it arrived as.  Dropping Mn here would deaccent
+                    # as well, and Munoz and Munoz-with-tilde are different
+                    # passwords with different digests: a grammar trained on
+                    # the stripped form can never generate the accented one.
+                    out = ud.normalize('NFC', ud.normalize('NFKD', word))
+                else:
+                    out = ''.join(c for c in ud.normalize('NFKD', word)
+                                  if ud.category(c) != 'Mn')
+                if out:
+                    w(encode(out, a.hex).encode('utf-8', 'surrogateescape') + b'\n')
+            if fh is not sys.stdin.buffer:
+                fh.close()
+        sys.stdout.buffer.flush()
+        return 0
+
+    if a.list:
+        print("%-26s %s  %s" % ("style", "0-9", "sample"))
+        for k in sorted(styles):
+            d = 'yes' if set('0123456789') & set(styles[k]) else ' no'
+            print("%-26s %s  %s" % (k.lower().replace(' ', '_'), d,
+                                    apply_style('Henrique20', 'map',
+                                                str.maketrans(styles[k]))))
+        for k in sorted(_COMBINING):
+            print("%-26s  na  %s" % (k, apply_style('Henrique20', 'comb', _COMBINING[k])))
+        print("%-26s  na  %s" % ('flip', apply_style('Henrique20', 'flip', None)))
+        for k in ('nfc', 'nfd'):
+            print("%-26s  na  %s" % (k, apply_style(_SAMPLE['hangul'], 'norm',
+                                                    k.upper())))
+        for k in sorted(compat):
+            sample = _SAMPLE.get(k.split('_')[0], 'Henrique20')
+            kind = 'dmap' if k.startswith('hangul_') else 'map'
+            print("%-26s  na  %s" % (k, apply_style(sample, kind,
+                                                    str.maketrans(compat[k]))))
+        print("\n%d substitution styles + %d combining + flip + 2 normalisation"
+              " + %d non-Latin" % (len(styles), len(_COMBINING), len(compat)))
+        print("Chinese, Cyrillic, Hebrew and Devanagari have no substitution "
+              "alphabet in Unicode;\nfor those use the combining overlays, the "
+              "enclosing marks, nfc/nfd and flip.")
+        return 0
+
+    if a.styles == 'all':
+        want = ([k.lower().replace(' ', '_') for k in sorted(styles)]
+                + sorted(_COMBINING) + ['flip', 'nfc', 'nfd'] + sorted(compat))
+    else:
+        want = [s.strip() for s in a.styles.split(',') if s.strip()]
+    chosen = build(styles, want, style_digits=not a.no_digits, compat=compat)
+
+    files = a.files or ['-']
+    # Write BYTES, never text.  sys.stdout's encoding follows the locale, and
+    # under LC_ALL=C (which every batch script here sets) that is ASCII - so
+    # every styled candidate raises UnicodeEncodeError and, if that exception is
+    # swallowed, the run completes with an EMPTY file and the attack afterwards
+    # reports a clean zero.  Encoding here explicitly makes the output identical
+    # on every host regardless of locale.
+    w = sys.stdout.buffer.write
+    emitted = defaultdict(int)
+    suppressed = defaultdict(int)
+    for fn in files:
+        # Read BYTES too: sys.stdin's decoder is locale-driven, so under
+        # LC_ALL=C reading a UTF-8 wordlist dies on the first accented byte.
+        fh = sys.stdin.buffer if fn == '-' else open(fn, 'rb')
+        for raw in fh:
+            word = read_word(raw)
+            if not word:
+                continue
+            for name, (kind, arg) in chosen:
+                styled = apply_style(word, kind, arg)
+                if styled == word and not a.keep_identity:
+                    suppressed[name] += 1
+                    continue
+                emitted[name] += 1
+                line = encode(styled, a.hex)
+                if a.label:
+                    line = name + '\t' + line
+                w(line.encode('utf-8', 'surrogateescape') + b'\n')
+        if fh is not sys.stdin.buffer:
+            fh.close()
+    sys.stdout.buffer.flush()
+
+    if a.stats:
+        e = sum(emitted.values())
+        sup = sum(suppressed.values())
+        print("\n[*] %d emitted, %d suppressed as identical to the input word"
+              % (e, sup), file=sys.stderr)
+        for name, _ in chosen:
+            print("[+] %-26s %12d emitted %12d suppressed"
+                  % (name, emitted[name], suppressed[name]), file=sys.stderr)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,483 @@
+.\" stylegen(1) -- man-macro reference page
+.\" $Revision: 1.1 $
+.\" $Log: stylegen.1,v $
+.\" Revision 1.1  2026/09/07 18:09:44  dlr
+.\" Initial revision: stylegen(1), documenting 1.7.
+.\"
+.\" Thirty-six styles measured rather than assumed: 15 substitution, 6 combining, flip, 2 normalisation, 12 non-Latin. Per-script coverage given for all eight scripts tested, including Hebrew and Devanagari at 7 each, which the docstring does not state.
+.\"
+.\" The two inverse modes are the part that matters and the part easiest to confuse. --strip decomposes and drops every combining mark, so it unstyles, deaccents and de-Zalgos; --unstyle recomposes and keeps the marks. The hash covers bytes, so a grammar trained on a deaccented form can never generate the accented password it came from: --unstyle is the one to put in front of a trainer, --strip the one for Zalgo.
+.\"
+.\" Records two behaviours that are in neither the docstring nor the usage text: standard input is '-' only, the word stdin is opened as a file and dies, which is an inconsistency with rling and rehex; and exit status is 0, 1 for an unknown style or unopenable file, and 2 from argparse for an unrecognised option.
+.\"
+.\" Clean under mandoc -T lint and groff -man -ww with stderr empty; longest rendered line 78 columns; pure ASCII.
+.\"
+.TH STYLEGEN 1 "2026-09-07" "stylegen 1.7" "Password Recovery"
+.SH NAME
+stylegen \- generate and undo "fancy text generator" styled password variants
+.SH SYNOPSIS
+.B stylegen
+.B \-\-list
+.br
+.B stylegen
+.RB [ \-\-styles
+.IR style [, style ...]]
+.RB [ \-\-hex ]
+.RB [ \-\-no\-digits ]
+.br
+.in +8n
+.RB [ \-\-keep\-identity ]
+.RB [ \-\-label ]
+.RB [ \-s ]
+.RI [ file " ...]"
+.in
+.br
+.B stylegen
+.BR \-\-strip | \-\-unstyle
+.RB [ \-\-hex ]
+.RI [ file " ...]"
+.SH DESCRIPTION
+.B stylegen
+reads candidate words and writes styled variants of each, replicating what
+the lingojam and fancytextguru class of websites produce: a whole-string
+codepoint substitution, in which every character that the chosen style has a
+glyph for is replaced and every character it does not have a glyph for
+passes through unchanged.
+.PP
+That pass-through is the point.  The sans-serif bold italic block defines no
+digits, so
+.B Henrique20
+styles to eight mathematical letters followed by an ASCII
+.B 2
+and
+.BR 0 .
+A real solved hash from that family:
+.PP
+.RS
+.nf
+b91cb86bee9ec2afe401fb3caf37807b1e011449:Henrique20
+.fi
+.RE
+.PP
+The digest is SHA-1 of the styled bytes; the base word the operator supplied
+was the ASCII
+.BR Henrique20 .
+Its first character is <U+1D643>, MATHEMATICAL SANS-SERIF BOLD ITALIC
+CAPITAL H.
+.PP
+None of these passwords were typed.  No keyboard layout emits <U+1D643>,
+and macOS Unicode Hex Input takes four hex digits, so it cannot enter a
+character outside the BMP at all.  They arrive by paste, which decides what
+the base list should be: names, handles and display names \(em the sort of
+string a person sets on a social media profile \(em rather than general
+dictionary words.
+.PP
+Like
+.BR procrule (1),
+.B stylegen
+never emits its source word; the caller supplies the base list either way.
+.SH "STYLE DERIVATION"
+The alphabets are derived from the Unicode database at run time, never
+hand-typed.  Every styled letter NFKD-normalises back to its ASCII original,
+so scanning the database for that recovers each mapping exactly.
+.PP
+This matters because the Mathematical Alphanumeric block has reserved holes
+where the letter is borrowed from the BMP instead.  SCRIPT CAPITAL B is
+<U+212C> and <U+1D49D> is unassigned; fraktur's C, H, I, R and Z are the five
+characters named BLACK-LETTER CAPITAL in the Letterlike Symbols block, not
+the codepoints their neighbours would predict.  Naive base-plus-offset
+arithmetic emits a non-character at every one of those holes, and a candidate
+containing one cannot match anything.
+.PP
+The non-Latin alphabets come from the same database by a different question:
+not
+.RI \(lq "does this decompose to ASCII" \(rq
+but
+.I why
+it decomposes.  The compatibility decomposition tags <isolated>, <initial>,
+<medial> and <final> are exactly the Arabic positional forms, <narrow> the
+halfwidth katakana, <compat> the Hangul jamo, and <font> the Greek half of
+the mathematical alphanumerics.
+.SH STYLES
+Thirty-six styles are available, in five groups.  Because they are derived at
+run time, the exact set follows the Unicode database of the Python that runs
+the tool;
+.B \-\-list
+is the authority, and prints a sample of each.
+.TP
+.B "15 substitution styles"
+.BR bold ,
+.BR bold_fraktur ,
+.BR bold_italic ,
+.BR bold_script ,
+.BR circled ,
+.BR double\-struck ,
+.BR fraktur ,
+.BR fullwidth ,
+.BR italic ,
+.BR monospace ,
+.BR sans\-serif ,
+.BR sans\-serif_bold ,
+.BR sans\-serif_bold_italic ,
+.B sans\-serif_italic
+and
+.BR script .
+These come from the Mathematical Alphanumeric block, which is Latin and Greek
+only.  Seven of them define digits \(em
+.BR bold ,
+.BR circled ,
+.BR double\-struck ,
+.BR fullwidth ,
+.BR monospace ,
+.B sans\-serif
+and
+.B sans\-serif_bold
+\(em and in the other eight the digits stay ASCII.
+.TP
+.B "6 combining overlays"
+.BR strikethrough ,
+.BR underline ,
+.BR overline ,
+.BR slash ,
+.B enclose_circle
+and
+.BR enclose_square .
+A combining mark is inserted after every character, so these work on any
+script.  The two enclosing marks are the only way to circle a word written in
+a script that has no circled block of its own.
+.TP
+.B flip
+Turned characters, then the string reversed.  There are no turned glyphs
+outside ASCII, so on any other script this reverses and nothing more.
+.TP
+.BR nfc ", " nfd
+Normalisation.  Same glyphs, different
+.IR bytes ,
+and the hash covers bytes.  Korean gains most: one precomposed syllable of
+three bytes decomposes to three jamo and nine bytes.  Japanese and Vietnamese
+move too.  A script with no composed form returns the input and is dropped as
+identity.
+.TP
+.B "12 non-Latin alphabets"
+.BR arabic_isolated ,
+.BR arabic_initial ,
+.BR arabic_medial ,
+.BR arabic_final ,
+.BR arabic_font ,
+.BR greek_compat ,
+.BR greek_font ,
+.BR hangul_compat ,
+.BR hangul_circle ,
+.BR hangul_narrow ,
+.B katakana_circle
+and
+.BR katakana_narrow .
+The Hangul alphabets map jamo, but Korean text is written in precomposed
+syllables, so those styles decompose the word first and then substitute.
+.SH "IDENTITY SUPPRESSION"
+A style that has no glyph for the script it is handed returns the word
+unchanged.  All 15 substitution styles pass an Arabic, Cyrillic, Devanagari
+or Hebrew word straight through, which made 75% of the output for a non-Latin
+base word an exact copy of the input: measured on a 94%-non-Latin base, 800,000
+output lines of which 237,500 were real.  A run built on that is
+three-quarters a plain dictionary attack wearing a costume, and its hits are
+all unstyled words that were already solved.
+.PP
+Identity output is therefore suppressed by default.
+.B \-\-keep\-identity
+restores it.
+.PP
+.B "CANARY WARNING."
+If a run is gated by grepping the generated stream for a known plaintext,
+that canary must be a word the styles can actually transform \(em Latin or
+ASCII.  A non-Latin canary styles to itself, is dropped as identity, and the
+gate then aborts a perfectly healthy run.
+.SH "NON-LATIN SCRIPTS"
+Styles that emit anything for one word of each script, under
+.BR "\-\-styles all" :
+.PP
+.RS
+.nf
+ASCII / Latin      22
+Arabic             12
+Korean             10
+Japanese           10
+Chinese             7
+Cyrillic            7
+Hebrew              7
+Devanagari          7
+.fi
+.RE
+.PP
+Chinese, Cyrillic, Hebrew and Devanagari have no substitution alphabet in
+Unicode at all.  The 55 circled CJK ideographs are numerals and markers, not
+letters, and Cyrillic offers three superscripts.  For those four scripts the
+honest style set is the six combining overlays plus
+.BR flip ;
+.B nfc
+and
+.B nfd
+return the input and are dropped.  Knowing that here is cheaper than
+concluding it from a run that returned nothing but the words it was fed.
+.SH "INVERSE MODES"
+.B \-\-strip
+and
+.B \-\-unstyle
+run the transformation backwards, recovering a base word from a styled or
+decorated one.  They differ in one step, and the distinction is the point.
+.PP
+.B \-\-strip
+compatibility-decomposes and then drops every combining mark.  It unstyles,
+deaccents and de-Zalgos in a single pass.
+.PP
+.B \-\-unstyle
+compatibility-decomposes and then recomposes with NFC.  It unstyles, and an
+accent returns to the single codepoint it arrived as.
+.PP
+Use
+.B \-\-unstyle
+to normalise plaintexts before training a grammar with
+.BR pcfg (1).
+The hash covers bytes, and
+.B Munoz
+and
+.B Mu
+followed by n-with-tilde and
+.B oz
+are different passwords with different digests, so a grammar trained on the
+deaccented form learns a terminal it can never turn back into the password it
+came from.  Use
+.B \-\-strip
+for the Zalgo case, where dropping the marks is the whole point.
+.PP
+Zalgo-class decoration \(em randomised combining-mark injection \(em cannot be
+generated at any useful scale.  Thirteen characters each carrying zero to
+three marks drawn from a pool of eleven is 1.4e41 combinations, and the full
+<U+0300> to <U+036F> block is 9.3e79.  It can be undone, and that is what
+makes such a password useful: it is intelligence about a base word, not a
+target.
+.PP
+Both inverse modes decode
+.B $HEX[]
+on input and honour
+.BR \-\-hex .
+.BR \-\-styles ,
+.BR \-\-label ,
+.B \-s
+and
+.B \-\-keep\-identity
+do not apply to them.  If both are given,
+.B \-\-unstyle
+wins.
+.SH OPTIONS
+.TP
+.B \-\-list
+Print every style with a sample and whether it defines digits, then exit.
+Latin styles are sampled with
+.BR Henrique20 ,
+the non-Latin ones with a word of the script they serve.
+.TP
+.BI \-\-styles " list"
+Comma-separated list of styles to apply.  The default,
+.BR all ,
+applies every style.  An unknown name is a fatal error naming the offender.
+.TP
+.B \-\-hex
+Wrap any output line that is not pure ASCII in
+.BI $HEX[ ... ]\fR,
+the toolchain's interchange form; see
+.BR rehex (1).
+Almost all styled output is non-ASCII, so this wraps nearly every line.
+.TP
+.B \-\-no\-digits
+Never style digits, even in the seven blocks that define them.  Affects only
+the substitution styles; the overlays and the non-Latin alphabets are
+unchanged.  Use it when the base list carries years or suffixes that the
+victim is likely to have typed after pasting a styled name.
+.TP
+.B \-\-keep\-identity
+Also emit variants identical to the input word.  See
+.BR "IDENTITY SUPPRESSION" .
+.TP
+.BR \-s ", " \-\-stats
+On exit, write per-style emitted and suppressed counts to standard error.
+This is what makes a pointless arm of a run visible before it is run rather
+than after: a style reporting zero emitted against the whole base list has
+nothing to contribute to the attack.
+.TP
+.B \-\-label
+Prefix each candidate with its style name and a TAB, so that a hit can be
+attributed to a style without reconstructing the run.  The prefix makes the
+line unusable as a candidate, so this is a diagnostic mode.
+.TP
+.B \-\-strip
+Inverse mode: recover the base word.  Compatibility-decomposes and drops
+every combining mark.  See
+.BR "INVERSE MODES" .
+.TP
+.B \-\-unstyle
+Inverse mode with marks preserved: compatibility-decompose, then recompose
+with NFC.  This is the mode to feed a
+.BR pcfg (1)
+trainer.  New in 1.7.
+.TP
+.BR \-h ", " \-\-help
+Print the module documentation, which carries the usage summary, and exit 0.
+.SH "INPUT AND OUTPUT"
+Input is read as bytes and output written as bytes, never as locale-encoded
+text.  Under
+.B LC_ALL=C
+a text write of a styled candidate raises an encoding error, and a run that
+swallows it completes with an empty file that the attack afterwards reports
+as a clean zero.  Reading bytes matters for the same reason: a locale-driven
+decoder dies on the first accented byte of a UTF-8 wordlist.
+.PP
+A line of the form
+.BI $HEX[ hexdigits ]
+is decoded on input, as it is everywhere else in this toolchain.  The corpora
+depend on that:
+.B hashmob.net_*.found
+and
+.B hashpwn.txt
+carry no raw high bytes at all, so every foreign word in them arrives
+wrapped, and styling the wrapper instead of the word produces output that
+looks plausible and is nonsense.  A malformed payload \(em non-hex, odd
+length, unterminated \(em falls through and is styled literally, because that
+is what it is.  The ASCII-payload case matters as much as the foreign one,
+since many
+.B $HEX[]
+plaintexts are pure ASCII wrapped only because they contain a colon.
+.PP
+Bytes that are not valid UTF-8 are carried through by surrogate escape and
+re-emitted unchanged, byte-exact in plain mode and hex-wrapped under
+.BR \-\-hex .
+Passwords are bytes rather than text, which is the entire reason
+.B $HEX[]
+exists.
+.PP
+With no
+.I file
+argument
+.B stylegen
+reads standard input.  The name
+.B \-
+also means standard input; unlike
+.BR rling (1)
+and
+.BR rehex (1),
+the word
+.B stdin
+is not special and is opened as a file.  Empty lines are skipped and produce
+no output.
+.SH "EXIT STATUS"
+0 on normal completion.  1 for an unknown style name, or for an input file
+that cannot be opened, which is reported as a Python traceback.  2 for an
+unrecognised command-line option.
+.SH EXAMPLES
+List the styles and see what each does to
+.BR Henrique20 :
+.PP
+.RS
+.nf
+stylegen \-\-list
+.fi
+.RE
+.PP
+Generate every style of a handle list, wrapped for safe piping, and search a
+hash file with it.
+.BR mdxfind (1)
+consumes the
+.B $HEX[]
+form natively:
+.PP
+.RS
+.nf
+stylegen \-\-hex handles.txt > styled.txt
+mdxfind \-m e1,e8 \-f hashes.txt styled.txt > results.txt
+.fi
+.RE
+.PP
+Reproduce the worked example above.  The digest is taken over the styled
+bytes with the trailing newline removed:
+.PP
+.RS
+.nf
+$ echo Henrique20 | stylegen \-\-styles sans\-serif_bold_italic \e
+      | tr \-d '\en' | openssl sha1
+SHA1(stdin)= b91cb86bee9ec2afe401fb3caf37807b1e011449
+.fi
+.RE
+.PP
+Find out which styles are worth running against a base list before spending
+the hash rate on them.  Output is discarded; the counts go to standard error:
+.PP
+.RS
+.nf
+stylegen \-s base.txt > /dev/null
+.fi
+.RE
+.PP
+Attribute a hit to the style that produced it:
+.PP
+.RS
+.nf
+stylegen \-\-label \-\-styles fraktur,script,circled base.txt
+.fi
+.RE
+.PP
+Normalise a set of recovered plaintexts, keeping accents, and train a grammar
+on the result:
+.PP
+.RS
+.nf
+stylegen \-\-unstyle found.txt | rling stdin bases.txt
+pcfg \-t bases.txt \-g grammar.d
+.fi
+.RE
+.PP
+Recover the base words from Zalgo-decorated plaintexts, where dropping the
+combining marks is the object:
+.PP
+.RS
+.nf
+stylegen \-\-strip zalgo.txt | rling stdin words.txt
+.fi
+.RE
+.PP
+Style a non-Latin base list, taking only the styles that can do anything with
+it:
+.PP
+.RS
+.nf
+stylegen \-\-styles strikethrough,underline,overline,slash,\e
+enclose_circle,enclose_square,flip,nfd \-\-hex cyrillic.txt
+.fi
+.RE
+.SH COMPATIBILITY
+.B stylegen
+must keep running under Python 3.4.3, which is what
+.B gp.bungi.com
+carries, and that is the host the corpora are on.  The constraint is visible
+in the source: the alphabet derivation tests
+.B "ord(d) < 128"
+rather than
+.BR str.isascii() ,
+which is 3.7 and later, and the output path calls
+.B binascii.hexlify()
+rather than
+.BR bytes.hex() ,
+which is 3.5 and later.  Before 1.6 the output path used
+.BR bytes.hex() ,
+and
+.B \-\-hex
+\(em the one flag that exists to make output safe for a password corpus \(em
+failed on every non-ASCII candidate on the one host that holds the wordlists.
+No third-party modules are used.
+.SH "SEE ALSO"
+.BR pcfg (1),
+.BR procrule (1),
+.BR mdxfind (1),
+.BR rehex (1),
+.BR rling (1)
+.SH AUTHOR
+Waffle.
