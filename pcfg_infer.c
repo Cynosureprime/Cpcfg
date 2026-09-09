@@ -179,44 +179,25 @@ static int fold_core(const char *s, int off, int len, char *dst)
     return n;
 }
 
-/* find best all-core word whose folded core equals folded (off..off+len of s) */
-static int fold_find(const char *s, int off, int len)
-{
-    char buf[MAX_WORD];
-    int fl = fold_core(s, off, len, buf);
-    uint32_t h = hash_bytes(buf, fl) & fold_mask;
-    while (fold_slots[h]) {
-        Word *w = &words[fold_slots[h] - 1];
-        char wbuf[MAX_WORD];
-        fold_core(w->s, w->core_off, w->core_len, wbuf);
-        if (w->core_len == fl && !strcmp(wbuf, buf)) return fold_slots[h] - 1;
-        h = (h + 1) & fold_mask;
-    }
-    return -1;
-}
-
+/* The fold table is a MULTIMAP: every word is inserted, and words sharing a
+ * folded core sit consecutively on one probe chain.
+ *
+ * It used to hold at most one word per folded core, and only words that were
+ * pure cores.  Both restrictions defeated the chained-stage inference this
+ * tool is for.  Excluding affixed words meant Dragon2021 could never be a
+ * SOURCE, so Dragon2021 -> !Dragon2021 was unreachable; collapsing a fold key
+ * to a single winner meant dragon and Dragon competed for one slot, so
+ * whichever lost could never be an antecedent either.  Between them, every
+ * word in a three-stage chain came out at depth 1, hanging directly off the
+ * root, with the intermediate links appearing only as backwards deletions. */
 static void fold_add(int id)
 {
     Word *w = &words[id];
-    if (w->core_off != 0 || w->core_len != w->len) return; /* only pure cores */
+    if (w->core_len <= 0) return;
     char buf[MAX_WORD];
-    int fl = fold_core(w->s, 0, w->len, buf);
+    int fl = fold_core(w->s, w->core_off, w->core_len, buf);
     uint32_t h = hash_bytes(buf, fl) & fold_mask;
-    while (fold_slots[h]) {
-        int cur = fold_slots[h] - 1;
-        Word *cw = &words[cur];
-        char cbuf[MAX_WORD];
-        fold_core(cw->s, cw->core_off, cw->core_len, cbuf);
-        int same_fold = cw->core_len == fl && !strcmp(cbuf, buf);
-        if (same_fold) {
-            /* prefer baseword, then higher count */
-            int replace = (w->is_base && !cw->is_base) ||
-                          (w->is_base == cw->is_base && w->count > cw->count);
-            if (replace) fold_slots[h] = id + 1;
-            return;
-        }
-        h = (h + 1) & fold_mask;
-    }
+    while (fold_slots[h]) h = (h + 1) & fold_mask;   /* first free slot */
     fold_slots[h] = id + 1;
 }
 
@@ -314,46 +295,128 @@ static int cnt_desc(const void *a, const void *b)
     return y < x ? -1 : y > x;
 }
 
+/* How far a word is from a plain lower-case alphabetic form: upper-case
+ * letters and leet digits both count.  Used ONLY to orient same-length edges
+ * (pure case or leet changes), so that dragon -> Dragon is admitted and
+ * Dragon -> dragon is not.  Without an orientation rule the two are
+ * symmetric and the "DAG" grows 2-cycles. */
+static int xform_score(const Word *w)
+{
+    int n = 0;
+    for (int i = 0; i < w->len; i++) {
+        unsigned char c = (unsigned char)w->s[i];
+        if (c >= 0x80) continue;
+        if (isupper(c)) n++;
+        else if (leet_fold(c) != (char)tolower(c)) n++;
+    }
+    return n;
+}
+
+/* Is A admissible as a source for B?  A strict order, so no cycle can form:
+ * a shorter word may derive a longer one, and at equal length the less
+ * transformed derives the more transformed. */
+static int may_derive(const Word *A, const Word *B)
+{
+    if (A->len != B->len) return A->len < B->len;
+    return xform_score(A) < xform_score(B);
+}
+
 static void infer_affix(void)
 {
-    char key[MAX_WORD];
+    char key[MAX_WORD], buf[MAX_WORD], wbuf[MAX_WORD];
     for (int b = 0; b < nwords; b++) {
         Word *B = &words[b];
         if (B->core_len <= 0) continue;
-        int a = fold_find(B->s, B->core_off, B->core_len);
-        if (a < 0 || a == b) continue;
-        Word *A = &words[a];
-        /* require the source to be an unaffixed core word */
-        if (A->core_off != 0 || A->core_len != A->len) continue;
+        /* Walk the WHOLE probe chain rather than taking the first hit.
+         * fold_find() returns one antecedent, and dragon and Dragon fold to
+         * the same key, so a chained stage could only ever be attributed to
+         * whichever of them won the hash insert -- which is why
+         * Dragon -> Dragon2021 was never inferred and every word sat at
+         * depth 1.  Every admissible source now gets an edge, and the longest
+         * path through them is the generator's pipeline. */
+        int fl = fold_core(B->s, B->core_off, B->core_len, buf);
+        uint32_t h = hash_bytes(buf, fl) & fold_mask;
         int prelen = B->core_off, postlen = B->len - B->core_off - B->core_len;
-        int type = E_AFFIX;
-        if (!prelen && !postlen)
-            type = B->core_len && memcmp(B->s, A->s, B->len)
-                     ? (A->len == B->len &&
-                        !strncasecmp(A->s, B->s, B->len) ? E_CASE : E_LEET)
-                     : E_LEET;
-        edge_add(a, b, type, B->s, prelen, B->s + B->core_off + B->core_len, postlen);
+        while (fold_slots[h]) {
+            int a = fold_slots[h] - 1;
+            h = (h + 1) & fold_mask;
+            if (a == b) continue;
+            Word *A = &words[a];
+            if (A->core_len != fl) continue;
+            fold_core(A->s, A->core_off, A->core_len, wbuf);
+            if (strcmp(wbuf, buf)) continue;
+            /* The unaffixed-source guard that used to stand here forbade
+             * exactly the chained stages this tool exists to reconstruct. */
+            if (!may_derive(A, B)) continue;
+            int type = E_AFFIX;
+            if (!prelen && !postlen)
+                type = B->core_len && memcmp(B->s, A->s, B->len)
+                         ? (A->len == B->len &&
+                            !strncasecmp(A->s, B->s, B->len) ? E_CASE : E_LEET)
+                         : E_LEET;
+            edge_add(a, b, type, B->s, prelen,
+                     B->s + B->core_off + B->core_len, postlen);
+        }
     }
     (void)key;
 }
 
 static void infer_deletion(void)
 {
-    /* for each word A, every single contiguous deletion whose result is an
-     * observed word becomes edge A -> B */
+    /* For each word A, every single contiguous deletion whose result is an
+     * observed word becomes edge A -> B, subject to two filters that between
+     * them removed 88 of the 95 edges this produced on a 94-word corpus whose
+     * generator contained exactly 7 deletions.
+     *
+     *   - ONE EDGE PER PAIR.  dragonfalcon -> dragon was emitted three times,
+     *     deleting six bytes at offsets 4, 5 and 6, because the deleted region
+     *     overlaps a repeat.  Only the leftmost span is kept, so the reported
+     *     deletion-shape histogram counts derivations rather than coincidences.
+     *
+     *   - NOT A CONCATENATION IN DISGUISE.  Every X+Y concatenation is also
+     *     "delete X" and "delete Y", so each concat manufactured deletion edges
+     *     pointing the opposite way to the truth: dragon derived FROM
+     *     dragonfalcon, which with the real concat edge makes a 2-cycle in a
+     *     structure documented as a DAG, and which replays during generation as
+     *     fragments like "alcon" and "onkey".  If the deleted span is itself an
+     *     observed word, this is a concatenation and CONCAT already has it. */
     char buf[MAX_WORD];
+    int *linked = calloc(nwords, sizeof(int));   /* pass number per target */
+    if (!linked) { fprintf(stderr, "pcfg_infer: out of memory\n"); exit(1); }
     for (int a = 0; a < nwords; a++) {
         Word *A = &words[a];
         int len = A->len;
         if (len < 2 || len > 48) continue;
-        int variants = 0;
-        for (int i = 0; i < len && variants < 256; i++) {
+        int found = 0;
+        /* cap on edges KEPT, not on spans examined: the old counter advanced
+         * once per candidate span, so a long word exhausted its budget on
+         * non-matches and was left half-explored in iteration order. */
+        for (int i = 0; i < len && found < 64; i++) {
             memcpy(buf, A->s, i);
-            for (int l = 1; i + l <= len && variants < 256; l++, variants++) {
-                if (nedges >= MAX_EDGES) return;
+            for (int l = 1; i + l <= len && found < 64; l++) {
+                if (nedges >= MAX_EDGES) { free(linked); return; }
                 memcpy(buf + i, A->s + i + l, len - i - l);
                 int b = word_find(buf, len - l);
+                /* Third filter: if the two words share a folded core they are
+                 * affix/case/leet related and infer_affix has the pair in the
+                 * forward direction.  Emitting the deletion as well pointed
+                 * Dragon2021 -> Dragon against dragon -> Dragon2021 and closed
+                 * a 2-cycle, which is why depth had to be computed as a
+                 * minimum to stay "immune to cycles". */
+                int related = 0;
                 if (b >= 0 && b != a) {
+                    char fa[MAX_WORD], fb[MAX_WORD];
+                    Word *Bw = &words[b];
+                    if (A->core_len > 0 && Bw->core_len > 0) {
+                        int la = fold_core(A->s, A->core_off, A->core_len, fa);
+                        int lb = fold_core(Bw->s, Bw->core_off, Bw->core_len, fb);
+                        related = (la == lb && !strcmp(fa, fb));
+                    }
+                }
+                if (b >= 0 && b != a && !related && linked[b] != a + 1 &&
+                    word_find(A->s + i, l) < 0) {
+                    linked[b] = a + 1;
+                    found++;
                     Edge *e = &edges[nedges++];
                     memset(e, 0, sizeof(*e));
                     e->from = a;
@@ -366,6 +429,7 @@ static void infer_deletion(void)
             }
         }
     }
+    free(linked);
 }
 
 static void infer_concat(void)
@@ -400,20 +464,37 @@ static void infer_concat(void)
     }
 }
 
-/* strata via layered BFS from roots: depth = minimum number of derivation
- * steps from a baseword; immune to cycles in the inferred edge set */
+#define MAX_DEPTH 24
+
+/* Strata: depth = LONGEST derivation chain from a baseword, which is what the
+ * header describes and what makes the generator's pipeline visible.
+ *
+ * This was a layered BFS taking the MINIMUM, and that flattened every recipe.
+ * A generator that capitalises, then appends digits, then prefixes punctuation
+ * leaves a direct baseword -> final affix edge alongside the stepwise ones, and
+ * the shortest route is the single edge -- so a three-stage recipe reported
+ * depth 1 and the strata said nothing.  Relaxation is bounded by MAX_DEPTH so
+ * that a residual cycle inflates a number rather than spinning. */
 static void compute_depths(void)
 {
     for (int b = 0; b < nwords; b++)
         words[b].depth = words[b].is_base ? 0 : -1;
-    for (int layer = 0; layer < 16; layer++) {
-        int assigned = 0;
+    for (int iter = 0; iter < MAX_DEPTH; iter++) {
+        int changed = 0;
         for (int e = 0; e < nedges; e++) {
-            if (words[edges[e].from].depth != layer) continue;
-            int v = edges[e].to;
-            if (words[v].depth < 0) { words[v].depth = layer + 1; assigned++; }
+            int u = edges[e].from, v = edges[e].to;
+            if (words[u].depth < 0 || words[u].depth >= MAX_DEPTH) continue;
+            /* A supplied baseword is a root by definition and stays at 0.
+             * Without this an edge running into one -- a deletion from a
+             * longer word, say -- relaxes it upwards, and basewords vanish
+             * from the depth-0 stratum they define. */
+            if (words[v].is_base) continue;
+            if (words[v].depth < words[u].depth + 1) {
+                words[v].depth = words[u].depth + 1;
+                changed = 1;
+            }
         }
-        if (!assigned) break;
+        if (!changed) break;
     }
 }
 
@@ -694,24 +775,82 @@ done:
 /* Driver                                                              */
 /* ------------------------------------------------------------------ */
 
+static int hexval(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode a $HEX[...] line in place; returns the new length, or -1 if the line
+ * is not a well-formed $HEX[] wrapper (in which case it is left alone).
+ *
+ * $HEX[] is an INPUT encoding everywhere else in this toolchain -- mdxfind
+ * consumes it natively, pack2 decodes it on input -- and the corpora rely on
+ * it: hashmob and hashpwn carry no raw high bytes at all, so every non-ASCII
+ * baseword in them arrives wrapped.  Without this, those lines are interned as
+ * the literal text "$HEX[...]", which then becomes a baseword, an affix and a
+ * deletion shape, all of them fictional. */
+static int hex_decode_inplace(char *s, int n)
+{
+    if (n < 6 || memcmp(s, "$HEX[", 5) || s[n - 1] != ']') return -1;
+    int body = n - 6;
+    if (body & 1) return -1;                    /* odd nibble count */
+    int o = 0;
+    for (int i = 0; i < body; i += 2) {
+        int hi = hexval((unsigned char)s[5 + i]), lo = hexval((unsigned char)s[6 + i]);
+        if (hi < 0 || lo < 0) return -1;         /* not hex: leave as text */
+        s[o++] = (char)((hi << 4) | lo);
+    }
+    s[o] = 0;
+    return o;
+}
+
+static uint64_t skipped_long, skipped_empty;
+
 static void load_file(const char *path, int is_base)
 {
     FILE *f = !strcmp(path, "-") ? stdin : fopen(path, "r");
     if (!f) { fprintf(stderr, "pcfg_infer: cannot open %s\n", path); exit(1); }
-    char line[MAX_WORD];
+    /* Read into a buffer larger than MAX_WORD so an over-long line can be
+     * DETECTED and skipped.  Reading into a MAX_WORD buffer silently split one
+     * long line into two words, and each fragment then looked like a baseword. */
+    char line[MAX_WORD * 8];
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
+        int truncated = (n == sizeof line - 1 && line[n - 1] != '\n');
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-        if (!n) continue;
+        if (truncated) {                         /* swallow the rest of the line */
+            int c; while ((c = fgetc(f)) != EOF && c != '\n') ;
+            skipped_long++;
+            continue;
+        }
+        int dl = hex_decode_inplace(line, (int)n);
+        if (dl >= 0) n = (size_t)dl;
+        if (!n) { skipped_empty++; continue; }
+        if (n >= MAX_WORD) { skipped_long++; continue; }
         total_lines++;
+        int before = nwords;
         int id = word_intern(line, (int)n, is_base);
+        /* Only a NEWLY interned word goes into the fold table.  A word present
+         * in both the wordlist and the baseword file is interned once but was
+         * fold_add()ed twice, putting it on the probe chain twice and doubling
+         * every edge derived from it. */
+        if (nwords == before) continue;
         if ((nwords + 1) * 3 / 2 > fold_mask) {
             free(fold_slots);
             do { fold_mask = (fold_mask << 1) | 1; } while ((nwords + 1) * 3 / 2 > fold_mask);
             fold_slots = calloc(fold_mask + 1, sizeof(int));
+            if (!fold_slots) { fprintf(stderr, "pcfg_infer: out of memory\n"); exit(1); }
+            /* The rebuild re-adds every interned word INCLUDING this one, so
+             * adding it again below would put it on the chain twice.  That was
+             * harmless while the table kept one entry per folded core; now that
+             * it is a multimap it duplicates every edge derived from it. */
             for (int b = 0; b < nwords; b++) fold_add(b);
+        } else {
+            fold_add(id);
         }
-        fold_add(id);
     }
     if (f != stdin) fclose(f);
 }
