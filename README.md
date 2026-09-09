@@ -33,8 +33,8 @@ Cpcfg adds:
 - **AHF synthetic generation** (`-A`): generates passwords never seen in training using OMEN Markov chains (inspired by hashcat PCFG)
 - **Model info** (`-i`): display grammar statistics (structure count, entry distribution, top patterns)
 - **Skip brute** (`-b`): exclude Markov/OMEN entries during generation
-- **$HEX[] support**: decodes $HEX-encoded passwords in training, encodes non-printable output
-- **File format compatible** with pcfg-go: trained grammars are interchangeable
+- **$HEX[] support**: decodes $HEX-encoded passwords in training, encodes non-printable output — on every generation path (`-G`, `-P`, `-A`), from one shared implementation
+- **File format compatible** with pcfg-go: trained grammars are interchangeable. `config.ini` describes every section type the grammar actually uses, including `B` (dates), `R` (repeats), the `L` leet transition and any `-E` category letters. One caveat: `Sem/` names its files by the whole type key (`N4.txt`) rather than by length (`4.txt`) as the other length-indexed directories do, so a reader must open the filenames `config.ini` lists rather than deriving them
 - **Memory reporting**: RSS displayed at key phases
 
 ## Building
@@ -304,7 +304,7 @@ Example: `password2024!` → `A8` `D4` `O1` (base structure `A8D4O1`)
 Inspired by SE#PCFG (TDSC 2025), as opt-in training flags:
 
 - **`-R`** types digit/alpha runs made of 2+ copies of a unit (`123123`, `hahaha`, `qazqazqaz`) as `R{len}` sections (`Repeats/{len}.txt`).
-- **`-E <dir>`** tags alpha words with a semantic category letter you define via wordlists: `dir/{X}*.txt`, one lowercase word per line, where `X` is the grammar type letter (reserved: `A D O Y X K E W C M L B R`). `mary123` then trains as `N4 D3` instead of `A4 D3`, and the grammar can regenerate `susan123` — vocabulary generalization through structure. Untagged words fall back to plain `A`. Terminals are stored per type key in `Sem/` (`N4.txt`), case/leet masks stay shared. Use the same `-E`/`-R` flags with `-D` so parsing matches.
+- **`-E <dir>`** tags alpha words with a semantic category letter you define via wordlists: `dir/{X}*.txt`, one word per line in whatever capitalisation the list comes in, where `X` is the grammar type letter (reserved: `A D O Y X K E W C M L B R`). Words are matched after folding — lowercased by Unicode rules, leet characters folded to the letters they stand for — so `MÜLLER` and `Öztürk` match; matching is exact on the folded form, so `José` does not tag `jose1990`. A word in several category files takes the alphabetically first filename's letter. A file matching neither `{Letter}*.txt` nor `_*.txt` is reported and skipped rather than aborting the load. `mary123` then trains as `N4 D3` instead of `A4 D3`, and the grammar can regenerate `susan123` — vocabulary generalization through structure. Untagged words fall back to plain `A`. Terminals are stored per type key in `Sem/` (`N4.txt`), case/leet masks stay shared. Use the same `-E`/`-R` flags with `-D` so parsing matches.
 - **`-s <frac>`** (with `-E`) reserves a fraction of each terminal distribution's probability mass for corpus words never seen in training (SEPCA-style smoothing): unobserved corpus words are injected with equal pseudo-counts sized to that budget. A file named `_*.txt` in the corpus dir provides the vocabulary for untagged `A` terminals.
 
 ```sh

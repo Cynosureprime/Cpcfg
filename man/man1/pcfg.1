@@ -57,6 +57,21 @@ pcfg \- probabilistic context-free grammar password generator
 .BI \-g " grammardir"
 .br
 .B pcfg
+.B \-P
+.BI \-g " grammardir"
+.RB [ \-n
+.IR count ]
+.RB [ \-e
+.IR temperature ]
+.br
+.B pcfg
+.B \-D
+.BI \-g " grammardir"
+.BI \-t " passwords"
+.RB [ \-o
+.IR file ]
+.br
+.B pcfg
 .BI \-M " grammar1"
 .BI \-M " grammar2"
 .BI \-g " outputdir"
@@ -126,6 +141,50 @@ Print statistics for the
 grammar \(em base structure count, and per-category entry counts for Alpha,
 Digits, Other, Keyboard, Capitalization, Years and Context \(em then exit.
 .TP
+.B \-P
+.B Sample.
+Draw candidates from the
+.B \-g
+grammar at random, weighted by
+.RI prob ^(1/ tau ),
+rather than enumerating them in probability order.  The count comes from
+.BR \-n ;
+.B \-e
+sets
+.IR tau .
+Unlike
+.BR \-G ,
+the output is unordered and may repeat, so it is a way to reach into the tail
+of the distribution without walking everything in front of it.
+.TP
+.B \-D
+.B Diagnose.
+Report how much of the password file given with
+.B \-t
+the
+.B \-g
+grammar can reach, and \(em for each password it cannot \(em which single
+missing entry blocks it: a base structure, an alpha word, a case or leet
+mask, a digit or special string, a date, a year, or a keyboard walk.  Prints
+a probability profile of the reachable part, a simulation of what closing
+each gap would recover, and, with
+.BR \-o ,
+the complete missing-entry list as
+.IR category \(rs t value \(rs t count .
+.IP
+The blocker is exclusive: a password missing both its base structure and its
+alpha word is counted once, under the structure.  The percentages therefore
+sum, and the largest is the one worth acting on.
+.IP
+.B \-D
+reads
+.B $HEX[]
+input.  It must be given the same
+.B \-E
+and
+.B \-R
+flags the grammar was trained with, because the grammar does not record them.
+.TP
 .BI \-M " grammardir"
 .B Merge.
 Combine two grammars into the
@@ -174,6 +233,65 @@ use, but it is why the option appears in both lists below.
 Alphabet size for the Markov model.  Default 100.  Training only \(em it has
 no effect on generation.
 .TP
+.B \-R
+Detect repeated strings.  A run that is a shorter string repeated \(em
+.BR 123123 ,
+.B hahaha
+\(em is typed
+.B R
+rather than split into its character classes.  Off by default.
+.TP
+.BI \-E " dir"
+Semantic categories.  Every
+.IB Letter *.txt
+in
+.I dir
+is a wordlist, one word per line, whose first character is the grammar type
+letter its words are tagged with: an alpha run found in
+.B Names.txt
+becomes
+.BR N4 ,
+not
+.BR A4 .
+The letters
+.B A D O Y X K E W C M L B R
+belong to the grammar itself and are refused.  A file whose name begins with
+an underscore is a fallback corpus rather than a category \(em see
+.BR \-s .
+A file matching neither pattern is reported and skipped, not fatal.
+.IP
+Words are matched after folding: lowercased by Unicode rules, and with leet
+characters folded to the letters they stand for.  A category list may
+therefore be written in its natural capitalisation \(em
+.BR M\(:ULLER ,
+.B \(:OZT\(:URK
+\(em and still match.  Folding is exact, so
+.B Jos\('e
+in a category file does not tag the password
+.BR jose1990 ;
+list the spellings that occur.
+.IP
+When a word appears in more than one category file, the alphabetically first
+filename wins, so naming the files controls precedence.
+.TP
+.BI \-s " fraction"
+Smoothing.  Reserve this fraction of each alpha terminal's probability mass
+for words that appear in the
+.BI _ *.txt
+fallback corpus but were never seen in training, so the grammar can generate
+vocabulary the training set did not contain.  Requires
+.BR \-E .
+.IP
+This is a vocabulary lever rather than a modelling improvement, and it is
+worth exactly what the corpus behind it is worth.  A fallback list drawn from
+the training data teaches nothing; one drawn from the evaluation set measures
+nothing.  Measured on 26,172 training and 6,543 held-out passwords at 500,000
+guesses:
+.BR /usr/share/dict/words ,
+which is related to neither, raised held-out hits from 538 to 633.  The same
+list rebuilt from the training passwords gave 536, and rebuilt from the full
+set \(em which contains the held-out passwords \(em appeared to give 3,116.
+.TP
 .BI \-C " text"
 Free-text comment recorded in the grammar's configuration.
 .TP
@@ -200,6 +318,18 @@ emits each candidate with the case the grammar recorded and nothing more,
 which cuts the candidate count substantially and is the right choice when
 the target is known to be case-sensitive in a way the corpus already
 reflects.
+.TP
+.BI \-e " temperature"
+Sampling temperature for
+.BR \-P .
+1.0 draws from the trained distribution; above 1.0 flattens it, reaching rare
+patterns sooner; below 1.0 sharpens it toward the most probable.  No effect
+outside
+.BR \-P .
+.TP
+.BI \-o " file"
+Destination for the complete missing-entry list written by
+.BR \-D .
 .TP
 .B \-d
 Emit debug output instead of guesses.
