@@ -13,8 +13,11 @@
  *   pcfg -t <wordlist> <rules_dir>     Train on passwords
  *   pcfg -g <rules_dir>                Generate guesses
  *
- * $Revision: 1.20 $
+ * $Revision: 1.21 $
  * $Log: pcfg.c,v $
+ * Revision 1.21  2026/09/09 12:50:25  dlr
+ * Merge blazer sample/diagnose/semantic work; new CLI options -D -P -E -R -e -o -s
+ *
  * Revision 1.20  2026/09/07 17:45:47  dlr
  * Version 1.20: byte-faithful training, and keyboard walks that know more than one keyboard.
  *
@@ -105,7 +108,7 @@
  * release tag must equal this revision, the same rule mdxfind and procrule
  * follow via their $Header strings.
  */
-static char rcsid[] = "$Header: /Users/dlr/src/mdfind/RCS/pcfg.c,v 1.20 2026/09/07 17:45:47 dlr Exp dlr $";
+static char rcsid[] = "$Header: /Users/dlr/src/mdfind/RCS/pcfg.c,v 1.21 2026/09/09 12:50:25 dlr Exp dlr $";
 
 static const char *pcfg_version(void)
 {
