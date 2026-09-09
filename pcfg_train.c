@@ -292,24 +292,7 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
              * records the original char per codepoint ('.' = literal). */
             char *lowered = ws->lowered;
             char *lmask = ws->leetmask;
-            int li = 0, ki = 0, si = 0;
-            while (si < vlen && li < PCFG_MAXLINE - 4) {
-                uint32_t cp;
-                int n = utf8_decode(val + si, vlen - si, &cp);
-                if (n == 0) break;
-                unsigned char fold = (n == 1)
-                    ? leet_fold[(unsigned char)val[si]] : 0;
-                if (fold) {
-                    lowered[li++] = (char)fold;
-                    lmask[ki++] = val[si];
-                } else {
-                    li += utf8_encode_width(lowered + li, utf8_to_lower(cp), n);
-                    lmask[ki++] = '.';
-                }
-                si += n;
-            }
-            lowered[li] = '\0';
-            lmask[ki] = '\0';
+            pcfg_fold_leet(val, vlen, lowered, PCFG_MAXLINE, lmask);
             if (SemLetters[(unsigned char)tchr]) {
                 /* semantic terminal: type key ("N4") → word counter */
                 Word_t *pv;

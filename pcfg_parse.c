@@ -54,15 +54,22 @@ int sem_load(const char *dir) {
         char *dot = strrchr(ent->d_name, '.');
         if (!dot || strcmp(dot, ".txt") != 0) continue;
         if (nnames >= capnames) {
-            capnames = capnames ? capnames * 2 : 32;
-            names = realloc(names, capnames * sizeof(char *));
-            if (!names) { closedir(dp); return -1; }
+            int newcap = capnames ? capnames * 2 : 32;
+            char **grown = realloc(names, newcap * sizeof(char *));
+            if (!grown) {
+                for (int k = 0; k < nnames; k++) free(names[k]);
+                free(names);
+                closedir(dp);
+                return -1;
+            }
+            names = grown;
+            capnames = newcap;
         }
         names[nnames] = strdup(ent->d_name);
         if (names[nnames]) nnames++;
     }
     closedir(dp);
-    qsort(names, nnames, sizeof(char *), cmp_str);
+    if (nnames > 1) qsort(names, nnames, sizeof(char *), cmp_str);
 
     for (int fi = 0; fi < nnames; fi++) {
         const char *dname = names[fi];
@@ -73,12 +80,14 @@ int sem_load(const char *dir) {
         } else {
             if (letter < 'A' || letter > 'Z' ||
                 strchr(sem_reserved, letter)) {
+                /* Skip, do not abort.  One stray README.txt in the category
+                 * directory used to disable -E for the whole run. */
                 fprintf(stderr,
-                        "pcfg: semantic file \"%s\": type letter '%c' is reserved\n",
-                        dname, letter);
-                for (int k = 0; k < nnames; k++) free(names[k]);
-                free(names);
-                return -1;
+                        "pcfg: semantic file \"%s\": type letter '%c' is %s"
+                        " - file ignored\n", dname, letter,
+                        strchr(sem_reserved, letter) ? "reserved by the grammar"
+                                                     : "not A-Z or _");
+                continue;
             }
             if (!SemLetters[letter]) {
                 SemLetters[letter] = 1;
@@ -97,11 +106,16 @@ int sem_load(const char *dir) {
                 len--;
             line[len] = '\0';
             if (len <= 0) continue;
-            for (int i = 0; i < len; i++)
-                line[i] = (char)fast_lower((unsigned char)line[i]);
+            char key[PCFG_MAXLINE];
+            pcfg_fold_word(line, len, key, sizeof(key));
+            if (!key[0]) continue;
             Word_t *pv;
-            JSLI(pv, SemMap, (uint8_t *)line);
-            *pv = (Word_t)letter;
+            JSLI(pv, SemMap, (uint8_t *)key);
+            /* First file wins, which is what the comment above promises.
+             * Assigning unconditionally gave the LAST file the word, because
+             * the names are walked in ascending order: a word in both
+             * Names.txt and Places.txt came out a Place. */
+            if (*pv == 0) *pv = (Word_t)(letter + 1);
         }
         fclose(fp);
     }
@@ -122,8 +136,10 @@ static char sem_lookup(const char *w) {
     if (!SemMap) return 0;
     Word_t *pv;
     JSLG(pv, SemMap, (const uint8_t *)w);
-    /* 0 = fallback corpus entry: known word, but no category tag */
-    return pv ? (char)*pv : 0;
+    /* Stored as letter + 1, so that a freshly inserted slot - which Judy
+     * zeroes - is distinguishable from a real entry.  A fallback-corpus word
+     * stores 1 and reads back as 0: known word, but no category tag. */
+    return pv ? (char)(*pv - 1) : 0;
 }
 
 /*
@@ -145,6 +161,73 @@ static inline unsigned char fast_lower(unsigned char c) {
 
 static inline int is_leet_char(unsigned char c) {
     return leet_fold[c] != 0;
+}
+
+/* Fold one alpha run to the key the semantic map is stored under: leet
+ * characters to their base letter, everything else to lowercase, each in the
+ * byte width it arrived in.
+ *
+ * This exists because sem_load() and the parser used to fold differently.
+ * sem_load() lowered with an ASCII-only table, so a category word carrying a
+ * non-ASCII capital was stored under a key nothing could ever look up:
+ * "MULLER" with U+00DC became "m<DC>ller" while the parser produced
+ * "m<FC>ller".  A German or Turkish names list in its natural capitalisation
+ * was almost entirely inert, and said nothing about it.  One fold, used by
+ * both sides, is the only way that stays fixed.
+ *
+ * Width-preserving, so a caller may keep using byte offsets taken from the
+ * unfolded run - which is what the multiword split does.
+ *
+ * Returns the folded length; out must hold outmax >= len + 5 bytes.
+ */
+/* As pcfg_fold_word(), but also records the leet mask: one character per
+ * codepoint, the original character where a leet substitution was folded away
+ * and '.' where it was not.  mask must hold outmax bytes.
+ *
+ * pcfg_train.c and pcfg_diff.c each had their own copy of this loop, and they
+ * had already drifted - the -D copy widened a lone high byte where the -t copy
+ * did not, so -D could report a terminal as missing from the very grammar -t
+ * had just written it into.  Two readings of one grammar have to fold
+ * identically or the diagnosis is about the fold, not the grammar.
+ *
+ * Returns the folded byte length; the mask length is the codepoint count.
+ */
+int pcfg_fold_leet(const char *s, int len, char *out, int outmax, char *mask) {
+    int o = 0, k = 0, i = 0;
+    while (i < len && o < outmax - 5) {
+        uint32_t cp;
+        int n = utf8_decode(s + i, len - i, &cp);
+        if (n == 0) break;
+        unsigned char fold = (n == 1) ? leet_fold[(unsigned char)s[i]] : 0;
+        if (fold) {
+            out[o++] = (char)fold;
+            mask[k++] = s[i];
+        } else {
+            o += utf8_encode_width(out + o, utf8_to_lower(cp), n);
+            mask[k++] = '.';
+        }
+        i += n;
+    }
+    out[o] = '\0';
+    mask[k] = '\0';
+    return o;
+}
+
+int pcfg_fold_word(const char *s, int len, char *out, int outmax) {
+    int o = 0, i = 0;
+    while (i < len && o < outmax - 5) {
+        uint32_t cp;
+        int n = utf8_decode(s + i, len - i, &cp);
+        if (n == 0) break;
+        unsigned char fold = (n == 1) ? leet_fold[(unsigned char)s[i]] : 0;
+        if (fold)
+            out[o++] = (char)fold;
+        else
+            o += utf8_encode_width(out + o, utf8_to_lower(cp), n);
+        i += n;
+    }
+    out[o] = '\0';
+    return o;
 }
 
 /* Context-sensitive patterns (from Go source) — with precomputed lengths */
@@ -677,17 +760,7 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
                 /* Folded, lowered copy for multiword splitting.  Folding is
                  * byte-position-preserving (1-byte leet char → 1-byte
                  * letter), so split lengths map straight back onto pw. */
-                int fl = 0, si2 = start;
-                while (si2 < start + alen) {
-                    uint32_t fcp;
-                    int fn = utf8_decode(pw + si2, start + alen - si2, &fcp);
-                    if (fn == 0) break;
-                    unsigned char fold = (fn == 1)
-                        ? leet_fold[(unsigned char)pw[si2]] : 0;
-                    fl += utf8_encode(lower + fl, fold ? fold : utf8_to_lower(fcp));
-                    si2 += fn;
-                }
-                lower[fl] = '\0';
+                int fl = pcfg_fold_word(pw + start, alen, lower, PCFG_MAXLINE);
 
                 /* Try multiword split (byte-level, ASCII only for now) */
                 int parts[16];

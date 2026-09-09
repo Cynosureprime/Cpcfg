@@ -221,6 +221,10 @@ extern unsigned char SemLetters[256]; /* loaded category letters */
 extern int SemHaveFallback;           /* a _*.txt corpus was loaded */
 extern int DetectRepeats;             /* -R: repeated-string detector */
 int  sem_load(const char *dir);       /* load categories; returns count, -1 on error */
+/* One fold for both sides of the semantic map: leet chars to their base
+ * letter, everything else lowercased, each in its arrival byte width. */
+int  pcfg_fold_word(const char *s, int len, char *out, int outmax);
+int  pcfg_fold_leet(const char *s, int len, char *out, int outmax, char *mask);
 void sem_free(void);
 int  pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
                 unsigned char *tag, char *lower);
