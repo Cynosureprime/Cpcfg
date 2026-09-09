@@ -434,9 +434,16 @@ int pcfg_sample_generate(const char *gramdir, GenCtx *ctx,
                     if (n == 0) break;
                     uint32_t mapped = (mask[mi] == 'U') ? utf8_to_upper(cp)
                                                         : utf8_to_lower(cp);
-                    /* Re-encode in place (same byte width for ASCII; UTF-8
-                     * upper/lower of same codepoint class stays same width) */
-                    utf8_encode(pw + ai, mapped);
+                    /* Re-encode in place.  utf8_encode() is wrong here: a
+                     * byte that arrived as a lone 0x80-0xFF decodes with
+                     * n == 1 and a codepoint >= 0x80, so it would write two
+                     * bytes into a one-byte slot and walk over the next
+                     * character.  utf8_encode_width() keeps the arrival
+                     * width, which is also what the terminal was trained on.
+                     * For n >= 2 the width is unchanged either way: every
+                     * mapping in utf8_to_upper/lower is +/-0x20, 0x50 or 1
+                     * and stays inside its own UTF-8 length class. */
+                    utf8_encode_width(pw + ai, mapped, n);
                     ai += n;
                     mi++;
                 }
@@ -486,13 +493,11 @@ int pcfg_sample_generate(const char *gramdir, GenCtx *ctx,
         pw[pwpos] = '\0';
 
         /* Emit */
-        if (outpos + pwpos + 1 >= SAMPLE_OUTBUF) {
+        if (outpos + PCFG_HEXLINE_MAX(pwpos) >= SAMPLE_OUTBUF) {
             write(STDOUT_FILENO, outbuf, outpos);
             outpos = 0;
         }
-        memcpy(outbuf + outpos, pw, pwpos);
-        outpos += pwpos;
-        outbuf[outpos++] = '\n';
+        outpos += pcfg_emit_line(outbuf + outpos, pw, pwpos);
         generated++;
     }
 

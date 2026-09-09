@@ -42,20 +42,6 @@ static lock    *pt_space;
 /* Write lock for stdout (parallel path only, NULL in single-threaded) */
 static lock    *write_lock;
 
-static const char hextab_lc[16] = "0123456789abcdef";
-
-/* ---- $HEX[] check ---- */
-static inline int needs_hex(const char *pass, int passlen) {
-    for (int i = 0; i < passlen; i++) {
-        if ((signed char)(pass[i] + 1) < '!')
-            return 1;
-        if (pass[i] == ':')
-            return 1;
-    }
-    if (passlen >= 5 && strncmp(pass, "$HEX[", 5) == 0)
-        return 1;
-    return 0;
-}
 
 /* ---- Per-worker state (all pre-allocated) ---- */
 typedef struct {
@@ -83,26 +69,9 @@ static void worker_flush(Worker *w) {
 }
 
 static inline void worker_emit(Worker *w, const char *guess, int len) {
-    if (needs_hex(guess, len)) {
-        int need = 5 + len * 2 + 2;
-        if (w->outpos + need >= OUTBUF_SIZE)
-            worker_flush(w);
-        memcpy(w->outbuf + w->outpos, "$HEX[", 5);
-        w->outpos += 5;
-        for (int i = 0; i < len; i++) {
-            unsigned char c = (unsigned char)guess[i];
-            w->outbuf[w->outpos++] = hextab_lc[(c >> 4) & 0xf];
-            w->outbuf[w->outpos++] = hextab_lc[c & 0xf];
-        }
-        w->outbuf[w->outpos++] = ']';
-        w->outbuf[w->outpos++] = '\n';
-    } else {
-        if (w->outpos + len + 1 >= OUTBUF_SIZE)
-            worker_flush(w);
-        memcpy(w->outbuf + w->outpos, guess, len);
-        w->outpos += len;
-        w->outbuf[w->outpos++] = '\n';
-    }
+    if (w->outpos + PCFG_HEXLINE_MAX(len) >= OUTBUF_SIZE)
+        worker_flush(w);
+    w->outpos += pcfg_emit_line(w->outbuf + w->outpos, guess, len);
     w->count++;
     guess_count++;
     if (guess_limit_val > 0 && guess_count >= guess_limit_val)

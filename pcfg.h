@@ -294,6 +294,52 @@ int      utf8_is_digit(uint32_t cp);
 uint32_t utf8_to_lower(uint32_t cp);
 uint32_t utf8_to_upper(uint32_t cp);
 
+/* $HEX[] output encoding.
+ *
+ * Every generator has to make the same decision about which guesses may go
+ * out as raw bytes, so the decision lives here rather than in one of them.
+ * pcfg_gen.c used to own it privately, and pcfg_sample.c -- written later --
+ * simply did not wrap anything: -P emitted non-printable bytes unquoted
+ * while -G $HEX[]-encoded the same terminal.  Inline rather than extern
+ * because this sits in the per-guess loop of both.
+ */
+static inline int pcfg_needs_hex(const char *pass, int passlen) {
+    for (int i = 0; i < passlen; i++) {
+        if ((signed char)(pass[i] + 1) < '!')   /* control, space, high byte */
+            return 1;
+        if (pass[i] == ':')                     /* would split hash:pass */
+            return 1;
+    }
+    if (passlen >= 5 && strncmp(pass, "$HEX[", 5) == 0)
+        return 1;                               /* literal, must not round-trip */
+    return 0;
+}
+
+/* Write one guess and its newline into out, wrapped in $HEX[] if it needs to
+ * be.  out must have room for PCFG_HEXLINE_MAX(passlen) bytes.  Returns the
+ * number written. */
+#define PCFG_HEXLINE_MAX(len) (5 + (len) * 2 + 2)
+
+static inline int pcfg_emit_line(char *out, const char *pass, int passlen) {
+    static const char hextab_lc[16] = "0123456789abcdef";
+    int o = 0;
+    if (pcfg_needs_hex(pass, passlen)) {
+        memcpy(out, "$HEX[", 5);
+        o = 5;
+        for (int i = 0; i < passlen; i++) {
+            unsigned char c = (unsigned char)pass[i];
+            out[o++] = hextab_lc[(c >> 4) & 0xf];
+            out[o++] = hextab_lc[c & 0xf];
+        }
+        out[o++] = ']';
+    } else {
+        memcpy(out, pass, passlen);
+        o = passlen;
+    }
+    out[o++] = '\n';
+    return o;
+}
+
 /* Utility */
 int  decode_hex(const char *hex, char *out, int hexlen);
 void format_prob(double prob, char *buf, int buflen);
