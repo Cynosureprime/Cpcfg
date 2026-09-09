@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -263,7 +264,7 @@ int pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count) {
                 int tlen = atoi(type + 1);
                 if (tlen <= 0) tlen = 1;
 
-                if (type[0] == 'A') {
+                if (type[0] == 'A' || SemLetters[(unsigned char)type[0]]) {
                     /* Generate synthetic alpha word via OMEN */
                     char word[64];
                     int wlen = omen_generate_word(og, tlen, level, word, &seed);

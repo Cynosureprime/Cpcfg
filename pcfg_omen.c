@@ -30,10 +30,12 @@
 
 /* OMEN context: n-gram entry */
 typedef struct OmenCtx {
-    int ip_count, ip_level;     /* initial prefix */
-    int ep_count, ep_level;     /* end prefix */
-    int cp_count;               /* total continuation count */
-    int next_count[256];        /* per-char continuation counts */
+    int64_t ip_count;           /* initial prefix */
+    int ip_level;
+    int64_t ep_count;           /* end prefix */
+    int ep_level;
+    int64_t cp_count;           /* total continuation count */
+    int64_t next_count[256];    /* per-char continuation counts */
     int next_level[256];        /* per-char continuation levels */
 } OmenCtx;
 
@@ -43,11 +45,11 @@ struct OmenTrainer {
     int alphabet_size;          /* max chars in alphabet */
     char *alphabet;             /* the alphabet string */
     int alpha_map[256];         /* char → index (-1 if not in alphabet) */
-    int ln_count[OMEN_MAX_LEN + 1]; /* length frequency */
-    int ln_level[OMEN_MAX_LEN + 1]; /* smoothed length levels */
+    int64_t ln_count[OMEN_MAX_LEN + 1]; /* length frequency */
+    int ln_level[OMEN_MAX_LEN + 1];     /* smoothed length levels */
     Pvoid_t contexts;           /* JudySL: prefix_string → OmenCtx* */
-    int total_ip;
-    int total_ep;
+    int64_t total_ip;
+    int64_t total_ep;
 };
 
 /* ---- Create OMEN trainer ---- */
@@ -122,13 +124,13 @@ static OmenCtx *get_context(OmenTrainer *ot, const char *prefix, int plen) {
 }
 
 /* ---- Train one password ---- */
-void omen_train(OmenTrainer *ot, const char *pw, int pwlen) {
+void omen_train_n(OmenTrainer *ot, const char *pw, int pwlen, int64_t n) {
     if (pwlen < OMEN_MIN_LEN || pwlen > OMEN_MAX_LEN) return;
     if (!ot->alphabet) return;
     if (!in_alphabet(ot, pw, pwlen)) return;
 
     int prefix_len = ot->ngram - 1;
-    ot->ln_count[pwlen]++;
+    ot->ln_count[pwlen] += n;
 
     for (int i = 0; i <= pwlen - prefix_len; i++) {
         if (!in_alphabet(ot, pw + i, prefix_len)) continue;
@@ -136,25 +138,29 @@ void omen_train(OmenTrainer *ot, const char *pw, int pwlen) {
         OmenCtx *ctx = get_context(ot, pw + i, prefix_len);
 
         if (i == 0) {
-            ctx->ip_count++;
-            ot->total_ip++;
+            ctx->ip_count += n;
+            ot->total_ip += n;
         }
 
         if (i + prefix_len < pwlen) {
             unsigned char next = (unsigned char)pw[i + prefix_len];
             if (ot->alpha_map[next] >= 0) {
-                ctx->next_count[next]++;
-                ctx->cp_count++;
+                ctx->next_count[next] += n;
+                ctx->cp_count += n;
             }
         } else {
-            ctx->ep_count++;
-            ot->total_ep++;
+            ctx->ep_count += n;
+            ot->total_ep += n;
         }
     }
 }
 
+void omen_train(OmenTrainer *ot, const char *pw, int pwlen) {
+    omen_train_n(ot, pw, pwlen, 1);
+}
+
 /* ---- Smoothing: convert counts to levels ---- */
-static int calc_level(int base_count, int total_count, double adjust) {
+static int calc_level(int64_t base_count, int64_t total_count, double adjust) {
     if (total_count == 0 || base_count == 0) return OMEN_MAX_LEVEL;
     double prob = ((double)base_count / (double)total_count) * adjust + 1e-11;
     int level = (int)floor(-log(prob));
@@ -183,7 +189,7 @@ void omen_smooth(OmenTrainer *ot) {
     }
 
     /* Smooth length levels */
-    int total_ln = 0;
+    int64_t total_ln = 0;
     for (int i = 0; i <= OMEN_MAX_LEN; i++) total_ln += ot->ln_count[i];
     for (int i = 0; i <= OMEN_MAX_LEN; i++)
         ot->ln_level[i] = calc_level(ot->ln_count[i], total_ln, 10.0);

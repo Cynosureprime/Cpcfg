@@ -69,7 +69,7 @@ static int is_junk_line(const char *pw, int pwlen) {
 }
 
 /* ---- Parse weighted input: "count:password" → returns count, advances *pw past count: ---- */
-static int64_t parse_weight(char **pw, int *pwlen) {
+int64_t parse_weight(char **pw, int *pwlen) {
     char *p = *pw;
     int len = *pwlen;
 
@@ -115,12 +115,16 @@ typedef struct {
     LenCounters cnt_digits;
     LenCounters cnt_other;
     LenCounters cnt_keyboard;
+    LenCounters cnt_leet;
+    LenCounters cnt_dates;
+    LenCounters cnt_repeats;
     Counter cnt_years;
     Counter cnt_context;
     Counter cnt_base;
     Counter cnt_email_prov;
     Counter cnt_web_host;
     Counter cnt_web_pfx;
+    Pvoid_t cnt_sem;            /* type key ("N4") → Counter */
     int64_t total_passwords;
 } ThreadCtx;
 
@@ -164,6 +168,14 @@ void lencounter_inc(LenCounters *lc, int len, const char *key) {
     if (pv == PJERR) { fprintf(stderr, "pcfg: Judy error\n"); exit(1); }
     Counter *c = (Counter *)pv;
     counter_inc(c, key);
+}
+
+void lencounter_inc_n(LenCounters *lc, int len, const char *key, int64_t n) {
+    Word_t *pv;
+    JLI(pv, *lc, (Word_t)len);
+    if (pv == PJERR) { fprintf(stderr, "pcfg: Judy error\n"); exit(1); }
+    Counter *c = (Counter *)pv;
+    counter_inc_n(c, key, n);
 }
 
 void counter_free(Counter *c) {
@@ -226,6 +238,25 @@ static void merge_thread_ctx(TrainCtx *global, ThreadCtx *tctx) {
     lencounter_merge(&global->cnt_digits, &tctx->cnt_digits);
     lencounter_merge(&global->cnt_other, &tctx->cnt_other);
     lencounter_merge(&global->cnt_keyboard, &tctx->cnt_keyboard);
+    lencounter_merge(&global->cnt_leet, &tctx->cnt_leet);
+    lencounter_merge(&global->cnt_dates, &tctx->cnt_dates);
+    lencounter_merge(&global->cnt_repeats, &tctx->cnt_repeats);
+    /* semantic terminals: outer JudySL type key → inner Counter */
+    if (tctx->cnt_sem) {
+        uint8_t tk[PCFG_MAXTYPE];
+        Word_t *pv;
+        tk[0] = '\0';
+        JSLF(pv, tctx->cnt_sem, tk);
+        while (pv) {
+            Word_t *dpv;
+            JSLI(dpv, global->cnt_sem, tk);
+            counter_merge((Counter *)dpv, (Counter *)pv);
+            JSLN(pv, tctx->cnt_sem, tk);
+        }
+        Word_t bytes;
+        JSLFA(bytes, tctx->cnt_sem);
+        tctx->cnt_sem = NULL;
+    }
     counter_merge(&global->cnt_years, &tctx->cnt_years);
     counter_merge(&global->cnt_context, &tctx->cnt_context);
     counter_merge(&global->cnt_base, &tctx->cnt_base);
@@ -236,12 +267,13 @@ static void merge_thread_ctx(TrainCtx *global, ThreadCtx *tctx) {
 }
 
 /* ---- Process one password into thread-local counters ---- */
-static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *ws) {
+static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *ws,
+                              int64_t weight) {
     int nsects = pcfg_parse(pw, pwlen, ws->sects, PCFG_MAXSECTIONS,
                             ws->tag, ws->lower);
     if (nsects <= 0) return;
 
-    tctx->total_passwords++;
+    tctx->total_passwords += weight;
 
     for (int i = 0; i < nsects; i++) {
         Section *s = &ws->sects[i];
@@ -251,38 +283,66 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
         memcpy(val, s->value, vlen);
         val[vlen] = '\0';
 
-        switch (s->type[0]) {
-        case ST_ALPHA: {
-            /* UTF-8 aware lowering */
+        char tchr = s->type[0];
+        if (tchr == ST_ALPHA || SemLetters[(unsigned char)tchr]) {
+            /* Alpha-class section (plain A or a semantic category letter):
+             * UTF-8 aware lowering + leet folding.  Sections only contain
+             * leet chars that sit between letters (parse trims the edges),
+             * so every leet char found here is folded.  The leet mask
+             * records the original char per codepoint ('.' = literal). */
             char *lowered = ws->lowered;
-            int li = 0, si = 0;
+            char *lmask = ws->leetmask;
+            int li = 0, ki = 0, si = 0;
             while (si < vlen && li < PCFG_MAXLINE - 4) {
                 uint32_t cp;
                 int n = utf8_decode(val + si, vlen - si, &cp);
                 if (n == 0) break;
-                li += utf8_encode(lowered + li, utf8_to_lower(cp));
+                unsigned char fold = (n == 1)
+                    ? leet_fold[(unsigned char)val[si]] : 0;
+                if (fold) {
+                    lowered[li++] = (char)fold;
+                    lmask[ki++] = val[si];
+                } else {
+                    li += utf8_encode(lowered + li, utf8_to_lower(cp));
+                    lmask[ki++] = '.';
+                }
                 si += n;
             }
             lowered[li] = '\0';
-            lencounter_inc(&tctx->cnt_alpha, s->tnum, lowered);
+            lmask[ki] = '\0';
+            if (SemLetters[(unsigned char)tchr]) {
+                /* semantic terminal: type key ("N4") → word counter */
+                Word_t *pv;
+                JSLI(pv, tctx->cnt_sem, (uint8_t *)s->type);
+                counter_inc_n((Counter *)pv, lowered, weight);
+            } else {
+                lencounter_inc_n(&tctx->cnt_alpha, s->tnum, lowered, weight);
+            }
             build_case_mask(val, vlen, ws->mask);
-            lencounter_inc(&tctx->cnt_masks, s->tnum, ws->mask);
-            break;
+            lencounter_inc_n(&tctx->cnt_masks, s->tnum, ws->mask, weight);
+            lencounter_inc_n(&tctx->cnt_leet, s->tnum, lmask, weight);
         }
+        else switch (tchr) {
         case ST_DIGIT:
-            lencounter_inc(&tctx->cnt_digits, s->tnum, val);
+            lencounter_inc_n(&tctx->cnt_digits, s->tnum, val, weight);
             break;
         case ST_OTHER:
-            lencounter_inc(&tctx->cnt_other, s->tnum, val);
+            lencounter_inc_n(&tctx->cnt_other, s->tnum, val, weight);
             break;
         case ST_YEAR:
-            counter_inc(&tctx->cnt_years, val);
+            counter_inc_n(&tctx->cnt_years, val, weight);
             break;
         case ST_CONTEXT:
-            counter_inc(&tctx->cnt_context, val);
+            counter_inc_n(&tctx->cnt_context, val, weight);
+            break;
+        case ST_DATE:
+            lencounter_inc_n(&tctx->cnt_dates, s->tnum, val, weight);
+            break;
+        case ST_REPEAT:
+            lencounter_inc_n(&tctx->cnt_repeats, s->tnum, val, weight);
             break;
         case ST_KEYBOARD:
-            lencounter_inc(&tctx->cnt_keyboard, s->tnum, val);
+            lencounter_inc_n(&tctx->cnt_keyboard, s->tnum, val, weight);
             break;
         case ST_EMAIL:
             {
@@ -295,7 +355,7 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
                         prov[plen] = '\0';
                         for (int j = 0; j < plen; j++)
                             prov[j] = fast_lower((unsigned char)prov[j]);
-                        counter_inc(&tctx->cnt_email_prov, prov);
+                        counter_inc_n(&tctx->cnt_email_prov, prov, weight);
                     }
                 }
             }
@@ -321,10 +381,10 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
                 if (hlen > 0 && hlen < 256) {
                     memcpy(host, start, hlen);
                     host[hlen] = '\0';
-                    counter_inc(&tctx->cnt_web_host, host);
+                    counter_inc_n(&tctx->cnt_web_host, host, weight);
                 }
                 if (*pfx)
-                    counter_inc(&tctx->cnt_web_pfx, pfx);
+                    counter_inc_n(&tctx->cnt_web_pfx, pfx, weight);
             }
             break;
         default:
@@ -334,7 +394,7 @@ static void train_password_tl(char *pw, int pwlen, ThreadCtx *tctx, WorkSpace *w
 
     build_base_structure(ws->sects, nsects, ws->base_str, PCFG_MAXLINE);
     if (ws->base_str[0])
-        counter_inc(&tctx->cnt_base, ws->base_str);
+        counter_inc_n(&tctx->cnt_base, ws->base_str, weight);
 }
 
 /* ---- Persistent worker thread ---- */
@@ -361,9 +421,10 @@ static void train_worker(void *arg) {
             char *pw = &buf[ridx[i].offset];
             int pwlen = ridx[i].len;
             if (pwlen <= 0 || pwlen >= PCFG_MAXLINE - 64) continue;
-            /* Weighted: skip count: prefix */
+            /* Weighted: strip count: prefix, keep the count */
+            int64_t weight = 1;
             if (GlobalTrainCtx->weighted)
-                (void)parse_weight(&pw, &pwlen);
+                weight = parse_weight(&pw, &pwlen);
             if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
                 int dlen = decode_hex(pw + 5, ws->decoded, pwlen - 5);
                 pw = ws->decoded; pwlen = dlen;
@@ -371,7 +432,7 @@ static void train_worker(void *arg) {
             if (pwlen <= 0) continue;
             /* Junk filter */
             if (GlobalTrainCtx->filter_junk && is_junk_line(pw, pwlen)) continue;
-            train_password_tl(pw, pwlen, tctx, ws);
+            train_password_tl(pw, pwlen, tctx, ws, weight);
         }
 
         lock *buflock = (buf == Readbuf) ? ReadBuf0 : ReadBuf1;
@@ -546,11 +607,10 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
             int pwlen = readindex[li].len;
             if (pwlen <= 0 || pwlen >= TRAIN_MAXLINE - 64) continue;
 
-            /* Weighted input: extract count prefix */
-            /* (weight is used for multiword/omen on main thread;
-               workers see each line once regardless) */
+            /* Weighted input: strip count prefix, keep the count */
+            int64_t weight = 1;
             if (ctx->weighted)
-                (void)parse_weight(&pw, &pwlen);
+                weight = parse_weight(&pw, &pwlen);
 
             /* $HEX[] decode */
             if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
@@ -564,17 +624,17 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
             if (ctx->filter_junk && is_junk_line(pw, pwlen)) continue;
 
             /* Multiword trie: always */
-            multiword_train(mwtrie, pw, pwlen);
+            multiword_train_n(mwtrie, pw, pwlen, weight);
 
             if (!alphabet_built) {
                 /* Collect char frequencies for OMEN alphabet */
                 for (int ci = 0; ci < pwlen; ci++) {
                     char cs[2] = { pw[ci], '\0' };
-                    counter_inc(&char_freq, cs);
+                    counter_inc_n(&char_freq, cs, weight);
                 }
             } else {
                 /* OMEN n-gram training */
-                omen_train(omen, pw, pwlen);
+                omen_train_n(omen, pw, pwlen, weight);
             }
         }
 
@@ -594,8 +654,9 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
                 char *pw = &readbuf[readindex[li].offset];
                 int pwlen = readindex[li].len;
                 if (pwlen <= 0 || pwlen >= TRAIN_MAXLINE - 64) continue;
+                int64_t weight = 1;
                 if (ctx->weighted)
-                    (void)parse_weight(&pw, &pwlen);
+                    weight = parse_weight(&pw, &pwlen);
                 if (pwlen >= 5 && strncmp(pw, "$HEX[", 5) == 0) {
                     int dlen = decode_hex(pw + 5, decoded_main, pwlen - 5);
                     pw = decoded_main;
@@ -603,7 +664,7 @@ int pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx) {
                 }
                 if (pwlen <= 0) continue;
                 if (ctx->filter_junk && is_junk_line(pw, pwlen)) continue;
-                omen_train(omen, pw, pwlen);
+                omen_train_n(omen, pw, pwlen, weight);
             }
         }
 

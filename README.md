@@ -24,7 +24,10 @@ Cpcfg adds:
 - **Single-pass I/O**: no file rewinding, works with pipes
 - **UTF-8 support**: Unicode alpha/case detection for Latin Extended, Cyrillic, Greek, CJK, Arabic, Hebrew, Thai
 - **Admission filter** (`-f`): removes rare tokens below a count threshold, reducing grammar size by 80%+ (inspired by [hashcat PCFG](https://github.com/matrix/hashcat/tree/pcfg_ahf_v1.0) by matrix)
-- **Weighted wordlists** (`-w`): input format `count:password` for frequency-aware training
+- **Weighted wordlists** (`-w`): input format `count:password` — weights flow into every counter, the multiword trie, and the OMEN Markov model for frequency-aware training
+- **Leet folding**: `p4ssw0rd` trains as the word "password" plus a learned substitution mask, so one trained word regenerates all its leet spellings (applied like case masks at generation)
+- **Date detection**: 6/8-digit runs that parse as calendar dates (`DDMMYYYY`, `MMDDYYYY`, `YYMMDD`, ...) are typed `B` instead of opaque digit runs
+- **Temperature sampling** (`-P`): sample passwords from the grammar weighted by `prob^(1/τ)` instead of enumerating — τ > 1 explores rare patterns, τ < 1 sharpens toward the most likely
 - **Junk filter** (`-F`): automatic removal of base64, hex hashes, JSON, and HTML from training input (inspired by hashcat PCFG)
 - **Grammar merge** (`-M`): combine two trained grammars by summing their counters (inspired by hashcat PCFG)
 - **AHF synthetic generation** (`-A`): generates passwords never seen in training using OMEN Markov chains (inspired by hashcat PCFG)
@@ -96,6 +99,9 @@ pcfg -M /tmp/round1_grammar -M /tmp/round2_grammar -g /tmp/combined_grammar
 # AHF: generate 1M synthetic passwords using Markov chains
 pcfg -A -g /tmp/rockyou_grammar -n 1000000
 
+# Sample 1M passwords at temperature 1.5 (more diversity)
+pcfg -P -g /tmp/rockyou_grammar -n 1000000 -e 1.5
+
 # Display grammar statistics
 pcfg -i -g /tmp/rockyou_grammar
 ```
@@ -108,7 +114,42 @@ Generate password guesses from a previously trained grammar:
 pcfg -G -g <grammar_dir> [options]
 ```
 
-Reads the grammar directory created by a prior training run and writes guesses to stdout in probability-descending order. Passwords containing colons or non-printable characters are output in `$HEX[]` encoding.
+Reads the grammar directory created by a prior training run and writes guesses to stdout in probability-descending order. Passwords containing colons or non-printable characters are output in `$HEX[]` encoding. Case masks (`C`) and leet masks (`L`) are applied to alpha values at generation time, mirroring how they were folded during training.
+
+### Sampling
+
+Sample passwords directly from the trained distribution instead of enumerating:
+
+```sh
+pcfg -P -g <grammar_dir> [-n count] [-e temperature]
+```
+
+Each sample draws a base structure weighted by `prob^(1/τ)`, then draws each terminal the same way, falling back to OMEN Markov generation for alpha slots with no trained data. τ = 1.0 is faithful to training; τ > 1 flattens the distribution for broader coverage; τ < 1 concentrates on the head. Sampling reaches deep, low-probability parts of the grammar without the priority queue's ordering overhead.
+
+### Coverage diagnosis
+
+Find out why a grammar misses a password set, and what would close the gap:
+
+```sh
+pcfg -D -g <grammar_A> -t <passwords_B> [-w] [-k] [-o <file>]
+```
+
+With `-o <file>` the complete missing-entry list is dumped as TSV — `category<TAB>value<TAB>count_in_B`, sorted by count within category (`-o -` writes to stdout). The full missing alpha vocabulary is then just:
+
+```sh
+pcfg -D -g grammar_A -t setB.txt -o missing.tsv
+awk -F'\t' '$1=="alpha"{print $2}' missing.tsv > missing_words.txt
+```
+
+Every B password is decomposed exactly as training would (structure, terminals, case/leet masks, dates) and checked against A's grammar. A password is generatable iff all components exist. The report shows:
+
+- **Reachable vs missed vs unsupported** (emails/websites are never generated)
+- **Primary blocker per miss**, tallied by category, with the most frequent missing entries — which words, structures, masks, digit strings, or dates B uses that A never saw
+- **Probability depth** of the reachable set under A (how deep in the queue B's passwords live)
+- **Gap closure simulation**: adding each missing category in order of impact, with the exact reachable % after each step, up to the merge ceiling
+- **Suggested commands** (`-M` merge, retrain) matched to the findings
+
+Limitations: multiword splitting is not replayed (the trie isn't saved), so compound words A split differently are attributed as alpha misses; diagnosis assumes the grammar was trained with the same cpcfg version (same leet/date rules).
 
 **Options:**
 | Flag | Description | Default |
@@ -222,7 +263,9 @@ Training output is stored in the grammar directory with this structure:
 │   └── grammar.txt      # Base structure probabilities
 ├── Alpha/               # Alphabetic values by length
 ├── Capitalization/      # Case masks by length
+├── Leet/                # Leet substitution masks by length
 ├── Digits/              # Digit sequences by length
+├── Dates/               # Date-shaped digit runs by length (6, 8)
 ├── Other/               # Special character sequences
 ├── Keyboard/            # Keyboard walk sequences
 ├── Years/               # Year values
@@ -234,7 +277,7 @@ Training output is stored in the grammar directory with this structure:
 
 Probability format: `value\tcount/total` (integer ratio, converted to float at load time).
 
-Grammars trained with Cpcfg can be loaded by pcfg-go's guesser, and vice versa.
+Grammars trained with Cpcfg can be loaded by pcfg-go's guesser, and vice versa. Cpcfg-specific extensions (the `Leet/` and `Dates/` directories, the `L`/`B` grammar types) are extra: pcfg-go ignores the unknown directories, while cpcfg uses them for leet-mask and date generation.
 
 ## How It Works
 
@@ -246,12 +289,52 @@ Each training password is parsed through 8 sequential detectors:
 2. **Emails** — `user@provider.tld` patterns
 3. **Websites** — `domain.tld` with optional `http://`/`www.` prefix
 4. **Years** — 4-digit years matching `19XX` or `20XX`
-5. **Context-sensitive** — fixed patterns like `;p`, `<3`, `Mr.`, `No.1`
-6. **Alpha runs** — letter sequences, with multiword trie splitting for compound words
-7. **Digit runs** — digit sequences
-8. **Other** — remaining special characters
+5. **Dates** — 6/8-digit runs that parse as calendar dates in any common order (`YYYYMMDD`, `DDMMYYYY`, `MMDDYYYY`, `YYMMDD`, `DDMMYY`, `MMDDYY`), validated per month and leap years
+6. **Context-sensitive** — fixed patterns like `;p`, `<3`, `Mr.`, `No.1`
+7. **Alpha runs** — letter sequences, with multiword trie splitting for compound words. Leet chars between letters (`4 a e`, `3 e`, `0 o`, `1 i`, `5 s`, `7 t`, `@ a`, `$ s`, `! i`) fold into the word: `p4ssw0rd` trains as "password" plus a leet mask, exactly like a case mask
+8. **Digit runs** — digit sequences
+9. **Other** — remaining special characters
+
+Leet chars only fold when surrounded by letters, so `password1` stays `A8 D1` (word + digit) while `p4ssw0rd` becomes a single `A8`. The leet mask is stored per length in `Leet/` and re-applied at generation, so every trained word can regenerate its leet variants.
 
 Example: `password2024!` → `A8` `D4` `O1` (base structure `A8D4O1`)
+
+### Semantic tagging (`-E`), smoothing (`-s`), repeats (`-R`)
+
+Inspired by SE#PCFG (TDSC 2025), as opt-in training flags:
+
+- **`-R`** types digit/alpha runs made of 2+ copies of a unit (`123123`, `hahaha`, `qazqazqaz`) as `R{len}` sections (`Repeats/{len}.txt`).
+- **`-E <dir>`** tags alpha words with a semantic category letter you define via wordlists: `dir/{X}*.txt`, one lowercase word per line, where `X` is the grammar type letter (reserved: `A D O Y X K E W C M L B R`). `mary123` then trains as `N4 D3` instead of `A4 D3`, and the grammar can regenerate `susan123` — vocabulary generalization through structure. Untagged words fall back to plain `A`. Terminals are stored per type key in `Sem/` (`N4.txt`), case/leet masks stay shared. Use the same `-E`/`-R` flags with `-D` so parsing matches.
+- **`-s <frac>`** (with `-E`) reserves a fraction of each terminal distribution's probability mass for corpus words never seen in training (SEPCA-style smoothing): unobserved corpus words are injected with equal pseudo-counts sized to that budget. A file named `_*.txt` in the corpus dir provides the vocabulary for untagged `A` terminals.
+
+```sh
+# categories: names (N), months (T), fallback vocabulary (_)
+mkdir sem && cp names.txt sem/N_names.txt && cp months.txt sem/T_months.txt && cp top10k.txt sem/_words.txt
+pcfg -t cracked.txt -g grammar -R -E sem -s 0.2
+```
+
+Building the category wordlists is easiest with `tools/build_sem.py` (Python 3, stdlib; `--lang` needs `pip install wordfreq`). It normalizes words to pcfg's terminal-key format, dedupes across categories with fixed priority (specific before generic), and writes the lettered files:
+
+```sh
+python3 tools/build_sem.py --out sem \
+    --builtin --names-ssa names.zip --geonames cities15000.txt \
+    --lang F=en:50000 --from-grammar /tmp/mygrammar
+```
+
+Sources: `--builtin` (calendar → `T`), `--names-ssa` (SSA yob files or zip → `N`, [names.zip](https://www.ssa.gov/oact/babynames/names.zip)), `--geonames` (GeoNames cities dump → `G`), `--lang F=en:50000` (top-N words of a language via wordfreq), `--from-wordlist N=file` (any wordlist you have), `--from-grammar DIR` (the Alpha vocabulary of a trained grammar — a good bootstrap from your own cracked data), `--fallback FILE` (`_words.txt`).
+
+No-Python alternatives for quick categories:
+
+```sh
+# English vocabulary from rockyou: frequent pure-alpha words as fallback corpus
+grep -E '^[a-z]{3,21}$' rockyou.txt | sort | uniq -c | awk '$1>=20{print $2}' > sem/_words.txt
+
+# any wordlist becomes a category
+cp names.txt sem/N_names.txt
+
+# vocabulary from an existing trained grammar
+cat grammar/Alpha/*.txt | cut -f1 | sort -u > sem/_words.txt
+```
 
 ### Priority Queue Generation
 

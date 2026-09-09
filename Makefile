@@ -45,24 +45,19 @@ LIBS = -lJudy -lpthread -lm
 
 OBJS = pcfg.o pcfg_parse.o pcfg_train.o pcfg_save.o pcfg_queue.o \
        pcfg_gen.o pcfg_keyboard.o pcfg_multi.o pcfg_omen.o pcfg_utf8.o \
-       pcfg_ahf.o yarn.o
+       pcfg_ahf.o pcfg_sample.o pcfg_diff.o yarn.o
 
 pcfg: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+# standalone derivation-graph inference tool (no libJudy needed)
+pcfg_infer: pcfg_infer.o
+	$(CC) $(LDFLAGS) -o $@ pcfg_infer.o -lm
 
 %.o: %.c pcfg.h yarn.h
 	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f pcfg $(OBJS)
+	rm -f pcfg pcfg_infer $(OBJS) pcfg_infer.o
 
 .PHONY: clean
-
-# Man pages. Source only -- man renders per terminal width, locale and
-# encoding, and every packager expects roff and compresses it itself.
-PREFIX ?= /usr/local
-MANDIR ?= $(PREFIX)/share/man
-
-install-man:
-	install -d $(DESTDIR)$(MANDIR)/man1
-	install -m 644 man/man1/*.1 $(DESTDIR)$(MANDIR)/man1/

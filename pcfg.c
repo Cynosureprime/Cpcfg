@@ -151,6 +151,7 @@ WorkSpace *ws_alloc(void) {
     ws->base_str = malloc(PCFG_MAXLINE);
     ws->mask = malloc(PCFG_MAXLINE);
     ws->lowered = malloc(PCFG_MAXLINE);
+    ws->leetmask = malloc(PCFG_MAXLINE);
     ws->decoded = malloc(PCFG_MAXLINE);
     ws->sects = malloc(PCFG_MAXSECTIONS * sizeof(Section));
     return ws;
@@ -160,7 +161,7 @@ void ws_free(WorkSpace *ws) {
     if (!ws) return;
     free(ws->tag); free(ws->lower); free(ws->val);
     free(ws->base_str); free(ws->mask); free(ws->lowered);
-    free(ws->decoded); free(ws->sects);
+    free(ws->leetmask); free(ws->decoded); free(ws->sects);
     free(ws);
 }
 
@@ -205,6 +206,9 @@ int get_nprocs(void) {
 #ifdef INTEL
 #include <emmintrin.h>
 #include <tmmintrin.h>  /* SSSE3: _mm_shuffle_epi8 */
+#ifndef ffs
+#define ffs __builtin_ffs   /* MinGW lacks the POSIX strings.h declaration */
+#endif
 inline char *findeol(char *s, int64_t l) {
     unsigned int align, res, f;
     __m128i cur, seek;
@@ -509,6 +513,10 @@ static void usage(const char *prog) {
         "    -w          Weighted input: lines are count:password format\n"
         "    -f <int>    Admission filter: min occurrence count (default 0=off)\n"
         "    -F          Filter junk lines (base64, hex hashes, JSON)\n"
+        "    -R          Detect repeated strings (\"123123\", \"hahaha\") as R sections\n"
+        "    -E <dir>    Semantic categories: dir/{X}*.txt wordlists, X = type letter\n"
+        "                (reserved: A D O Y X K E W C M L B R; _*.txt = fallback corpus)\n"
+        "    -s <float>  Smoothing: corpus mass fraction for unobserved words (needs -E)\n"
         "    -S          Save sensitive data (emails, full URLs)\n"
         "    -c <float>  PCFG vs OMEN coverage 0.0-1.0 (default 0.6)\n"
         "    -n <int>    OMEN n-gram size 2-5 (default 4)\n"
@@ -522,6 +530,19 @@ static void usage(const char *prog) {
         "AHF (synthetic generation):\n"
         "  %s -A -g <grammar_dir> [-n count]\n"
         "\n"
+        "Sampling (temperature-controlled):\n"
+        "  %s -P -g <grammar_dir> [-n count] [-e temp]\n"
+        "    -n <int>    Number of samples (default 1000000)\n"
+        "    -e <float>  Temperature: 1.0 = trained distribution,\n"
+        "                >1 flatter (more diversity), <1 sharper (default 1.0)\n"
+        "\n"
+        "Diagnose (coverage gap analysis):\n"
+        "  %s -D -g <grammar_A> -t <passwords_B> [-w] [-k] [-o <file>] [-E <dir>] [-R]\n"
+        "    Reports why B passwords are missing from grammar A\n"
+        "    (structures, words, digits, masks, leet) and how to close the gap\n"
+        "    -o <file>  Dump the complete missing-entry list (category/value/count)\n"
+        "    -E/-R must match the flags grammar A was trained with\n"
+        "\n"
         "Info:\n"
         "  %s -i -g <grammar_dir>\n"
         "\n"
@@ -533,7 +554,7 @@ static void usage(const char *prog) {
         "    -k          Keep case as trained (no case mangling)\n"
         "    -d          Debug output instead of guesses\n"
         "    -T <int>    Max threads (default: auto)\n"
-        "\n", pcfg_version(), prog, prog, prog, prog, prog);
+        "\n", pcfg_version(), prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* ---- Main ---- */
@@ -558,10 +579,17 @@ int main(int argc, char **argv) {
     int mode_gen = 0;
     int mode_info = 0;
     int mode_ahf = 0;
+    int mode_sample = 0;
+    int mode_diff = 0;
+    int opt_repeats = 0;
+    double sample_temp = 1.0;
+    double smooth = 0.0;
+    char *semdir = NULL;
+    char *diff_out = NULL;
     char *merge_dirs[2] = {NULL, NULL};
     int n_merge = 0;
 
-    while ((opt = getopt(argc, argv, "t:g:r:GiASwf:Fc:n:a:C:M:bdkT:hV")) != -1) {
+    while ((opt = getopt(argc, argv, "t:g:r:GiASPDwRE:f:o:Fs:c:n:a:C:M:bdke:T:hV")) != -1) {
         switch (opt) {
         case 't':
             infile = optarg;
@@ -574,6 +602,27 @@ int main(int argc, char **argv) {
             break;
         case 'A':
             mode_ahf = 1;
+            break;
+        case 'P':
+            mode_sample = 1;
+            break;
+        case 'D':
+            mode_diff = 1;
+            break;
+        case 'o':
+            diff_out = optarg;
+            break;
+        case 'R':
+            opt_repeats = 1;
+            break;
+        case 'E':
+            semdir = optarg;
+            break;
+        case 's':
+            smooth = atof(optarg);
+            break;
+        case 'e':
+            sample_temp = atof(optarg);
             break;
         case 'g':
         case 'r':
@@ -655,8 +704,8 @@ int main(int argc, char **argv) {
 
         /* Count entries per type by scanning directories */
         const char *dirs[] = {"Alpha","Digits","Other","Keyboard",
-                              "Capitalization","Years","Context",
-                              "Emails","Websites",NULL};
+                              "Capitalization","Leet","Dates","Repeats","Sem",
+                              "Years","Context","Emails","Websites",NULL};
         int64_t total_entries = 0;
         for (int d = 0; dirs[d]; d++) {
             char path[PCFG_MAXPATH];
@@ -734,14 +783,56 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Determine mode: -t = training, -G = generation, -A = AHF */
-    int mode_train = (infile != NULL);
-    if (!mode_train && !mode_gen && !mode_ahf) {
-        fprintf(stderr, "pcfg: specify -t (train), -G (generate), or -A (AHF)\n");
+    /* Diagnose mode: -D -g <grammar_A> -t <passwords_B> */
+    if (mode_diff) {
+        if (mode_gen || mode_ahf || mode_sample) {
+            fprintf(stderr, "pcfg: cannot use -D with -G, -A, or -P\n");
+            return 1;
+        }
+        if (!grammardir) {
+            fprintf(stderr, "pcfg: -D requires -g <grammar_A>\n");
+            return 1;
+        }
+        if (!infile) {
+            fprintf(stderr, "pcfg: -D requires -t <password_file_B>\n");
+            return 1;
+        }
+        if (smooth > 0.0) {
+            fprintf(stderr, "pcfg: -s is a training option\n");
+            return 1;
+        }
+        if (semdir) {
+            int nc = sem_load(semdir);
+            if (nc < 0) return 1;
+            fprintf(stderr, "pcfg: semantic tagging: %d categories from \"%s\"\n",
+                    nc, semdir);
+        }
+        DetectRepeats = opt_repeats;
+        return pcfg_diagnose(grammardir, infile, tctx.weighted, gctx.skip_case,
+                             diff_out);
+    }
+
+    if (diff_out) {
+        fprintf(stderr, "pcfg: -o is only valid with -D\n");
         return 1;
     }
-    if (mode_train && mode_gen) {
-        fprintf(stderr, "pcfg: cannot use -t and -G together\n");
+
+    /* Determine mode: -t = training, -G = generation, -A = AHF, -P = sample */
+    int mode_train = (infile != NULL);
+    if (!mode_train && !mode_gen && !mode_ahf && !mode_sample) {
+        fprintf(stderr, "pcfg: specify -t (train), -G (generate), -A (AHF), or -P (sample)\n");
+        return 1;
+    }
+    if (mode_train && (mode_gen || mode_ahf || mode_sample)) {
+        fprintf(stderr, "pcfg: cannot use -t with -G, -A, or -P\n");
+        return 1;
+    }
+    if (!mode_train && (semdir || opt_repeats || smooth > 0.0)) {
+        fprintf(stderr, "pcfg: -R, -E and -s are training/diagnose options\n");
+        return 1;
+    }
+    if (mode_ahf && mode_sample) {
+        fprintf(stderr, "pcfg: cannot use -A and -P together\n");
         return 1;
     }
 
@@ -750,6 +841,16 @@ int main(int argc, char **argv) {
 
     /* SIGINT: use default handler (terminate). Don't catch it. */
 
+    /* Sample mode: -P -g <grammar> [-n count] [-e temp] */
+    if (mode_sample && grammardir) {
+        if (sample_temp <= 0.0) {
+            fprintf(stderr, "pcfg: temperature must be > 0\n");
+            return 1;
+        }
+        int64_t scount = gctx.guess_limit > 0 ? gctx.guess_limit : 1000000;
+        return pcfg_sample_generate(grammardir, &gctx, scount, sample_temp);
+    }
+
     /* AHF mode: -A -g <grammar> [-n count] */
     if (mode_ahf && grammardir) {
         int64_t ahf_count = gctx.guess_limit > 0 ? gctx.guess_limit : 1000000;
@@ -757,6 +858,25 @@ int main(int argc, char **argv) {
     }
 
     if (mode_train) {
+        if (semdir) {
+            int nc = sem_load(semdir);
+            if (nc < 0) return 1;
+            tctx.semdir = semdir;
+            fprintf(stderr, "pcfg: semantic tagging: %d categories from \"%s\"\n",
+                    nc, semdir);
+        } else if (smooth > 0.0) {
+            fprintf(stderr, "pcfg: -s requires -E <dir>\n");
+            return 1;
+        }
+        if (smooth > 0.0) {
+            if (smooth >= 1.0) {
+                fprintf(stderr, "pcfg: smoothing must be < 1.0\n");
+                return 1;
+            }
+            tctx.smoothing = smooth;
+        }
+        DetectRepeats = opt_repeats;
+
         tctx.filename = infile;
 
         /* Create output directory */
