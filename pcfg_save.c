@@ -561,9 +561,14 @@ static void apply_smoothing(TrainCtx *ctx) {
             while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) len--;
             line[len] = '\0';
             if (len <= 0) continue;
-            for (int i = 0; i < len; i++)
-                if (line[i] >= 'A' && line[i] <= 'Z') line[i] += 32;
-            corpus_add_word(&corpus, ent->d_name[0], line);
+            /* Fold exactly as training folded the terminals this corpus is
+             * about to be injected alongside.  This was a third private
+             * copy of an ASCII-only lowering, so a smoothing corpus with
+             * non-ASCII capitals in it injected words under keys the
+             * grammar never uses - the same defect as sem_load()'s. */
+            char key[PCFG_MAXLINE];
+            if (pcfg_fold_word(line, len, key, sizeof(key)) <= 0) continue;
+            corpus_add_word(&corpus, ent->d_name[0], key);
             nwords++;
         }
         fclose(fp);
