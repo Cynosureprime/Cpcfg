@@ -226,13 +226,26 @@ static void gen_uuid(char *buf, int len) {
     buf[len > 32 ? 32 : len - 1] = '\0';
 }
 
+/* What was actually written to disk, so config.ini can describe it.
+ * Section-type letters that carry no entries get no stanza and no
+ * transition, which is how a reader tells an absent type from an empty one. */
+typedef struct {
+    int *alpha,  nalpha;
+    int *digit,  ndigits;
+    int *other,  nother;
+    int *kbd,    nkbd;
+    int *mask,   nmask;
+    int *leet,   nleet;
+    int *date,   ndates;
+    int *repeat, nrepeats;
+    char  semletters[64];   /* distinct category letters, in load order */
+    int   nsem;
+    char (*semfiles)[PCFG_MAXTYPE];  /* type keys written under Sem/ */
+    int   nsemfiles;
+} SavedLens;
+
 /* ---- Write config.ini ---- */
-static int write_config(const char *outdir, TrainCtx *ctx,
-                        int *alpha_lens, int nalpha,
-                        int *digit_lens, int ndigits,
-                        int *other_lens, int nother,
-                        int *kbd_lens, int nkbd,
-                        int *mask_lens, int nmask) {
+static int write_config(const char *outdir, TrainCtx *ctx, const SavedLens *sl) {
     char path[PCFG_MAXPATH];
     snprintf(path, sizeof(path), "%s/config.ini", outdir);
 
@@ -281,6 +294,19 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, ", {\"Config_id\": \"BASE_K\", \"Transition_id\": \"K\"}");
     fprintf(fp, ", {\"Config_id\": \"BASE_X\", \"Transition_id\": \"X\"}");
     fprintf(fp, ", {\"Config_id\": \"BASE_Y\", \"Transition_id\": \"Y\"}");
+    /* Section types this build can also emit into a base structure.  They
+     * were missing here: a grammar with dates in it named B in grammar.txt
+     * and then said nothing about B, so any reader that works from
+     * config.ini - pcfg-go and pcfg_cracker both do - saw an undefined
+     * type.  Date detection is on by default, so this was the ordinary
+     * case, not an opt-in one. */
+    if (sl->ndates > 0)
+        fprintf(fp, ", {\"Config_id\": \"BASE_B\", \"Transition_id\": \"B\"}");
+    if (sl->nrepeats > 0)
+        fprintf(fp, ", {\"Config_id\": \"BASE_R\", \"Transition_id\": \"R\"}");
+    for (int i = 0; i < sl->nsem; i++)
+        fprintf(fp, ", {\"Config_id\": \"BASE_%c\", \"Transition_id\": \"%c\"}",
+                sl->semletters[i], sl->semletters[i]);
     fprintf(fp, "]\n");
     fprintf(fp, "filenames = [\"grammar.txt\"]\n");
     fprintf(fp, "\n");
@@ -293,10 +319,13 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "file_type = Length\n");
     fprintf(fp, "inject_type = Wordlist\n");
     fprintf(fp, "is_terminal = False\n");
-    fprintf(fp, "replacements = [{\"Config_id\": \"CAPITALIZATION\", \"Transition_id\": \"Capitalization\"}]\n");
+    fprintf(fp, "replacements = [{\"Config_id\": \"CAPITALIZATION\", \"Transition_id\": \"Capitalization\"}");
+    if (sl->nleet > 0)
+        fprintf(fp, ", {\"Config_id\": \"LEET\", \"Transition_id\": \"Leet\"}");
+    fprintf(fp, "]\n");
     fprintf(fp, "filenames = [");
-    for (int i = 0; i < nalpha; i++)
-        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", alpha_lens[i]);
+    for (int i = 0; i < sl->nalpha; i++)
+        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->alpha[i]);
     fprintf(fp, "]\n\n");
 
     /* BASE_D */
@@ -308,8 +337,8 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "inject_type = Copy\n");
     fprintf(fp, "is_terminal = True\n");
     fprintf(fp, "filenames = [");
-    for (int i = 0; i < ndigits; i++)
-        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", digit_lens[i]);
+    for (int i = 0; i < sl->ndigits; i++)
+        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->digit[i]);
     fprintf(fp, "]\n\n");
 
     /* BASE_O */
@@ -321,8 +350,8 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "inject_type = Copy\n");
     fprintf(fp, "is_terminal = True\n");
     fprintf(fp, "filenames = [");
-    for (int i = 0; i < nother; i++)
-        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", other_lens[i]);
+    for (int i = 0; i < sl->nother; i++)
+        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->other[i]);
     fprintf(fp, "]\n\n");
 
     /* BASE_K */
@@ -334,8 +363,8 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "inject_type = Copy\n");
     fprintf(fp, "is_terminal = True\n");
     fprintf(fp, "filenames = [");
-    for (int i = 0; i < nkbd; i++)
-        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", kbd_lens[i]);
+    for (int i = 0; i < sl->nkbd; i++)
+        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->kbd[i]);
     fprintf(fp, "]\n\n");
 
     /* BASE_X */
@@ -358,6 +387,81 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "is_terminal = True\n");
     fprintf(fp, "filenames = [\"1.txt\"]\n\n");
 
+    /* BASE_B - date-shaped digit runs */
+    if (sl->ndates > 0) {
+        fprintf(fp, "[BASE_B]\n");
+        fprintf(fp, "name = B\n");
+        fprintf(fp, "function = Copy\n");
+        fprintf(fp, "directory = Dates\n");
+        fprintf(fp, "file_type = Length\n");
+        fprintf(fp, "inject_type = Copy\n");
+        fprintf(fp, "is_terminal = True\n");
+        fprintf(fp, "filenames = [");
+        for (int i = 0; i < sl->ndates; i++)
+            fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->date[i]);
+        fprintf(fp, "]\n\n");
+    }
+
+    /* BASE_R - repeated strings */
+    if (sl->nrepeats > 0) {
+        fprintf(fp, "[BASE_R]\n");
+        fprintf(fp, "name = R\n");
+        fprintf(fp, "function = Copy\n");
+        fprintf(fp, "directory = Repeats\n");
+        fprintf(fp, "file_type = Length\n");
+        fprintf(fp, "inject_type = Copy\n");
+        fprintf(fp, "is_terminal = True\n");
+        fprintf(fp, "filenames = [");
+        for (int i = 0; i < sl->nrepeats; i++)
+            fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->repeat[i]);
+        fprintf(fp, "]\n\n");
+    }
+
+    /* BASE_<letter> - semantic categories.
+     *
+     * Sem/ names its files by the whole type key ("N4.txt"), not by length
+     * ("4.txt") the way every other Length directory does, so filenames is
+     * listed explicitly and a reader must open what is named rather than
+     * derive it.  Making Sem/ a directory per letter would fit the existing
+     * schema and is worth doing, but it changes the on-disk format and is
+     * blazer's call, not something to slip into a merge. */
+    for (int i = 0; i < sl->nsem; i++) {
+        char L = sl->semletters[i];
+        fprintf(fp, "[BASE_%c]\n", L);
+        fprintf(fp, "name = %c\n", L);
+        fprintf(fp, "function = Shadow\n");
+        fprintf(fp, "directory = Sem\n");
+        fprintf(fp, "file_type = Length\n");
+        fprintf(fp, "inject_type = Wordlist\n");
+        fprintf(fp, "is_terminal = False\n");
+        fprintf(fp, "replacements = [{\"Config_id\": \"CAPITALIZATION\", \"Transition_id\": \"Capitalization\"}");
+        if (sl->nleet > 0)
+            fprintf(fp, ", {\"Config_id\": \"LEET\", \"Transition_id\": \"Leet\"}");
+        fprintf(fp, "]\n");
+        fprintf(fp, "filenames = [");
+        int first = 1;
+        for (int j = 0; j < sl->nsemfiles; j++) {
+            if (sl->semfiles[j][0] != L) continue;
+            fprintf(fp, "%s\"%s.txt\"", first ? "" : ", ", sl->semfiles[j]);
+            first = 0;
+        }
+        fprintf(fp, "]\n\n");
+    }
+
+    /* LEET - substitution masks, applied over an alpha value like case */
+    if (sl->nleet > 0) {
+        fprintf(fp, "[LEET]\n");
+        fprintf(fp, "name = L\n");
+        fprintf(fp, "function = Leet\n");
+        fprintf(fp, "directory = Leet\n");
+        fprintf(fp, "file_type = Length\n");
+        fprintf(fp, "is_terminal = True\n");
+        fprintf(fp, "filenames = [");
+        for (int i = 0; i < sl->nleet; i++)
+            fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->leet[i]);
+        fprintf(fp, "]\n\n");
+    }
+
     /* CAPITALIZATION */
     fprintf(fp, "[CAPITALIZATION]\n");
     fprintf(fp, "name = C\n");
@@ -366,8 +470,8 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     fprintf(fp, "file_type = Length\n");
     fprintf(fp, "is_terminal = True\n");
     fprintf(fp, "filenames = [");
-    for (int i = 0; i < nmask; i++)
-        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", mask_lens[i]);
+    for (int i = 0; i < sl->nmask; i++)
+        fprintf(fp, "%s\"%d.txt\"", i ? ", " : "", sl->mask[i]);
     fprintf(fp, "]\n\n");
 
     fclose(fp);
@@ -540,6 +644,12 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
     int other_lens[256], nother = 0;
     int kbd_lens[256], nkbd = 0;
     int mask_lens[256], nmask = 0;
+    int leet_lens[256], nleet = 0;
+    int date_lens[256], ndates = 0;
+    int repeat_lens[256], nrepeats = 0;
+    static char semfiles[256][PCFG_MAXTYPE];
+    char semletters[64];
+    int nsemfiles = 0, nsem = 0;
 
     int af = ctx->admit_threshold;
     if (af > 0)
@@ -579,15 +689,15 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
 
     /* Leet substitution masks (no admission filter — compact) */
     snprintf(subdir, sizeof(subdir), "%s/Leet", outdir);
-    save_len_counters(subdir, ctx->cnt_leet, NULL, NULL, 0);
+    save_len_counters(subdir, ctx->cnt_leet, leet_lens, &nleet, 0);
 
     /* Date-shaped digit runs */
     snprintf(subdir, sizeof(subdir), "%s/Dates", outdir);
-    save_len_counters(subdir, ctx->cnt_dates, NULL, NULL, 0);
+    save_len_counters(subdir, ctx->cnt_dates, date_lens, &ndates, 0);
 
     /* Repeated strings */
     snprintf(subdir, sizeof(subdir), "%s/Repeats", outdir);
-    save_len_counters(subdir, ctx->cnt_repeats, NULL, NULL, 0);
+    save_len_counters(subdir, ctx->cnt_repeats, repeat_lens, &nrepeats, 0);
 
     /* Semantic terminals — one file per type key, filename IS the key */
     if (ctx->cnt_sem) {
@@ -607,6 +717,14 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
                     char path[PCFG_MAXPATH];
                     snprintf(path, sizeof(path), "%s/%s.txt", subdir, tk);
                     write_prob_file(path, entries, count, total);
+                    if (nsemfiles < 256) {
+                        snprintf(semfiles[nsemfiles], PCFG_MAXTYPE, "%s", (char *)tk);
+                        nsemfiles++;
+                    }
+                    int seen = 0;
+                    for (int i = 0; i < nsem; i++)
+                        if (semletters[i] == (char)tk[0]) { seen = 1; break; }
+                    if (!seen && nsem < 64) semletters[nsem++] = (char)tk[0];
                 }
                 free_entries(entries, count);
             }
@@ -652,12 +770,21 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
     ensure_dir(subdir);
 
     /* Config.ini */
-    write_config(outdir, ctx,
-                 alpha_lens, nalpha,
-                 digit_lens, ndigits,
-                 other_lens, nother,
-                 kbd_lens, nkbd,
-                 mask_lens, nmask);
+    SavedLens sl;
+    memset(&sl, 0, sizeof(sl));
+    sl.alpha  = alpha_lens;  sl.nalpha    = nalpha;
+    sl.digit  = digit_lens;  sl.ndigits   = ndigits;
+    sl.other  = other_lens;  sl.nother    = nother;
+    sl.kbd    = kbd_lens;    sl.nkbd      = nkbd;
+    sl.mask   = mask_lens;   sl.nmask     = nmask;
+    sl.leet   = leet_lens;   sl.nleet     = nleet;
+    sl.date   = date_lens;   sl.ndates    = ndates;
+    sl.repeat = repeat_lens; sl.nrepeats  = nrepeats;
+    memcpy(sl.semletters, semletters, sizeof(sl.semletters));
+    sl.nsem = nsem;
+    sl.semfiles = semfiles;
+    sl.nsemfiles = nsemfiles;
+    write_config(outdir, ctx, &sl);
 
     return 0;
 }
