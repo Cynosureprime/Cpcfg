@@ -374,6 +374,164 @@ static int write_config(const char *outdir, TrainCtx *ctx,
     return 0;
 }
 
+/* ---- Corpus smoothing (SE#PCFG-style, -s) ----
+ * Reserves a fraction of each terminal distribution's mass for corpus words
+ * not observed in training.  Injected as pseudo-counts into the counters
+ * before saving, so probabilities written to disk come out consistent.
+ * Corpus layout: JudySL letter ("N", or "_" for the fallback-A corpus) →
+ * JudyL codepoint-length → JudySL word → 1. */
+static void corpus_add_word(Pvoid_t *corpus, char letter, const char *word) {
+    char lkey[2] = { letter ? letter : '_', '\0' };
+    Word_t *lp;
+    JSLI(lp, *corpus, (uint8_t *)lkey);
+    /* lp is the slot holding the letter → length-map pointer */
+    Word_t *lp2;
+    JLI(lp2, *(Pvoid_t *)lp, (Word_t)utf8_cplen(word, (int)strlen(word)));
+    /* lp2 is the slot holding the length → word-set pointer */
+    Word_t *wp;
+    JSLI(wp, *(Pvoid_t *)lp2, (uint8_t *)word);
+    *wp = 1;
+}
+
+static void smooth_inject(Counter *c, Pvoid_t *words, double frac) {
+    /* observed total */
+    int64_t total = 0;
+    uint8_t idx[PCFG_MAXLINE];
+    Word_t *pv;
+    idx[0] = '\0';
+    JSLF(pv, *c, idx);
+    while (pv) { total += (int64_t)*pv; JSLN(pv, *c, idx); }
+    if (total <= 0) return;
+
+    /* corpus words this type has never seen */
+    char **unobs = NULL;
+    int n = 0, cap = 0;
+    idx[0] = '\0';
+    JSLF(pv, *words, idx);
+    while (pv) {
+        Word_t *hit;
+        JSLG(hit, *c, idx);
+        if (!hit) {
+            if (n >= cap) {
+                cap = cap ? cap * 2 : 64;
+                unobs = realloc(unobs, cap * sizeof(char *));
+                if (!unobs) return;
+            }
+            unobs[n++] = strdup((char *)idx);
+        }
+        JSLN(pv, *words, idx);
+    }
+    if (n == 0) { free(unobs); return; }
+
+    int64_t pseudo = (int64_t)ceil((frac / (1.0 - frac)) * (double)total / (double)n);
+    if (pseudo < 1) pseudo = 1;
+    for (int i = 0; i < n; i++) {
+        counter_inc_n(c, unobs[i], pseudo);
+        free(unobs[i]);
+    }
+    free(unobs);
+}
+
+static void apply_smoothing(TrainCtx *ctx) {
+    if (!ctx->semdir || ctx->smoothing <= 0.0) return;
+
+    Pvoid_t corpus = NULL;
+    DIR *dp = opendir(ctx->semdir);
+    if (!dp) {
+        fprintf(stderr, "pcfg: smoothing: cannot open \"%s\"\n", ctx->semdir);
+        return;
+    }
+    struct dirent *ent;
+    int nwords = 0;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char *dot = strrchr(ent->d_name, '.');
+        if (!dot || strcmp(dot, ".txt") != 0) continue;
+        char path[PCFG_MAXPATH];
+        snprintf(path, sizeof(path), "%s/%s", ctx->semdir, ent->d_name);
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+        char line[PCFG_MAXLINE];
+        while (fgets(line, sizeof(line), fp)) {
+            int len = strlen(line);
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) len--;
+            line[len] = '\0';
+            if (len <= 0) continue;
+            for (int i = 0; i < len; i++)
+                if (line[i] >= 'A' && line[i] <= 'Z') line[i] += 32;
+            corpus_add_word(&corpus, ent->d_name[0], line);
+            nwords++;
+        }
+        fclose(fp);
+    }
+    closedir(dp);
+    fprintf(stderr, "pcfg: smoothing: %d corpus words, mass fraction %.2f\n",
+            nwords, ctx->smoothing);
+
+    /* fallback corpus → plain A terminals, per length */
+    if (SemHaveFallback) {
+        Word_t *lp;
+        JSLG(lp, corpus, (const uint8_t *)"_");
+        if (lp) {
+            Pvoid_t bylen = *(Pvoid_t *)lp;
+            Word_t len = 0;
+            Word_t *cl;
+            JLF(cl, bylen, len);
+            while (cl) {
+                Word_t *ac;
+                JLG(ac, ctx->cnt_alpha, len);
+                if (ac) smooth_inject((Counter *)ac, (Pvoid_t *)cl, ctx->smoothing);
+                JLN(cl, bylen, len);
+            }
+        }
+    }
+
+    /* category corpora → semantic terminals, per type key */
+    for (int L = 0; L < 256; L++) {
+        if (!SemLetters[L]) continue;
+        char lkey[2] = { (char)L, '\0' };
+        Word_t *lp;
+        JSLG(lp, corpus, (uint8_t *)lkey);
+        if (!lp) continue;
+        Pvoid_t bylen = *(Pvoid_t *)lp;
+        Word_t len = 0;
+        Word_t *cl;
+        JLF(cl, bylen, len);
+        while (cl) {
+            char tk[PCFG_MAXTYPE];
+            snprintf(tk, sizeof(tk), "%c%d", (char)L, (int)len);
+            Word_t *sp;
+            JSLG(sp, ctx->cnt_sem, (uint8_t *)tk);
+            if (sp) smooth_inject((Counter *)sp, (Pvoid_t *)cl, ctx->smoothing);
+            JLN(cl, bylen, len);
+        }
+    }
+
+    /* free corpus */
+    uint8_t lidx[2];
+    Word_t *lp;
+    lidx[0] = '\0';
+    JSLF(lp, corpus, lidx);
+    while (lp) {
+        Pvoid_t bylen = *(Pvoid_t *)lp;
+        Word_t len = 0;
+        Word_t *cl;
+        JLF(cl, bylen, len);
+        while (cl) {
+            Counter w = *(Counter *)cl;
+            counter_free(&w);
+            JLN(cl, bylen, len);
+        }
+        Word_t bytes;
+        JLFA(bytes, bylen);
+        JSLN(lp, corpus, lidx);
+    }
+    {
+        Word_t bytes;
+        JSLFA(bytes, corpus);
+    }
+}
+
 /* ---- Save complete grammar ---- */
 int pcfg_save(const char *outdir, TrainCtx *ctx) {
     char subdir[PCFG_MAXPATH];
@@ -388,6 +546,9 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
         fprintf(stderr, "pcfg: saving grammar to \"%s\" (admission filter: min count %d)\n", outdir, af);
     else
         fprintf(stderr, "pcfg: saving grammar to \"%s\"\n", outdir);
+
+    /* inject unobserved corpus vocabulary before anything is written */
+    apply_smoothing(ctx);
 
     /* Grammar (base structures — no admission filter) */
     snprintf(subdir, sizeof(subdir), "%s/Grammar", outdir);
@@ -415,6 +576,43 @@ int pcfg_save(const char *outdir, TrainCtx *ctx) {
     /* Keyboard */
     snprintf(subdir, sizeof(subdir), "%s/Keyboard", outdir);
     save_len_counters(subdir, ctx->cnt_keyboard, kbd_lens, &nkbd, 0);
+
+    /* Leet substitution masks (no admission filter — compact) */
+    snprintf(subdir, sizeof(subdir), "%s/Leet", outdir);
+    save_len_counters(subdir, ctx->cnt_leet, NULL, NULL, 0);
+
+    /* Date-shaped digit runs */
+    snprintf(subdir, sizeof(subdir), "%s/Dates", outdir);
+    save_len_counters(subdir, ctx->cnt_dates, NULL, NULL, 0);
+
+    /* Repeated strings */
+    snprintf(subdir, sizeof(subdir), "%s/Repeats", outdir);
+    save_len_counters(subdir, ctx->cnt_repeats, NULL, NULL, 0);
+
+    /* Semantic terminals — one file per type key, filename IS the key */
+    if (ctx->cnt_sem) {
+        snprintf(subdir, sizeof(subdir), "%s/Sem", outdir);
+        ensure_dir(subdir);
+        uint8_t tk[PCFG_MAXTYPE];
+        Word_t *pv;
+        tk[0] = '\0';
+        JSLF(pv, ctx->cnt_sem, tk);
+        while (pv) {
+            Counter c = (Counter)*pv;
+            if (c) {
+                CountEntry *entries = NULL;
+                int64_t total = 0;
+                int count = collect_counter(c, &entries, &total, 0);
+                if (count > 0 && total > 0) {
+                    char path[PCFG_MAXPATH];
+                    snprintf(path, sizeof(path), "%s/%s.txt", subdir, tk);
+                    write_prob_file(path, entries, count, total);
+                }
+                free_entries(entries, count);
+            }
+            JSLN(pv, ctx->cnt_sem, tk);
+        }
+    }
 
     /* Years */
     snprintf(subdir, sizeof(subdir), "%s/Years", outdir);
@@ -600,6 +798,7 @@ static int load_base_structures(const char *path, BaseStructure **bases_out, int
         while (*p) {
             char type_buf[PCFG_MAXTYPE];
             int ti = 0;
+            if (nrepl >= PCFG_MAXSECTIONS) break;
 
             /* First char is the type letter */
             type_buf[ti++] = *p++;
@@ -645,8 +844,9 @@ int pcfg_load(const char *ruledir, GenCtx *ctx) {
     /* Scan for files and load each type
      * We need to discover which length files exist for each type directory */
     const char *dirs[] = { "Alpha", "Digits", "Other", "Keyboard",
-                           "Capitalization", "Years", "Context" };
-    const char *prefixes[] = { "A", "D", "O", "K", "C", "Y", "X" };
+                           "Capitalization", "Leet", "Dates", "Repeats",
+                           "Years", "Context" };
+    const char *prefixes[] = { "A", "D", "O", "K", "C", "L", "B", "R", "Y", "X" };
     int ndirs = sizeof(dirs) / sizeof(dirs[0]);
 
     for (int d = 0; d < ndirs; d++) {
@@ -683,6 +883,33 @@ int pcfg_load(const char *ruledir, GenCtx *ctx) {
             *pv = (Word_t)gel;
         }
         closedir(dp);
+    }
+
+    /* Semantic type files: the filename IS the type key ("N4.txt" → "N4") */
+    snprintf(path, sizeof(path), "%s/Sem", ruledir);
+    DIR *sdp = opendir(path);
+    if (sdp) {
+        struct dirent *ent;
+        while ((ent = readdir(sdp)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char *dot = strrchr(ent->d_name, '.');
+            if (!dot || strcmp(dot, ".txt") != 0) continue;
+
+            char typekey[PCFG_MAXTYPE];
+            snprintf(typekey, sizeof(typekey), "%.*s",
+                     (int)(dot - ent->d_name), ent->d_name);
+
+            char filepath[PCFG_MAXPATH];
+            snprintf(filepath, sizeof(filepath), "%s/Sem/%s", ruledir, ent->d_name);
+
+            GrammarEntryList *gel = load_tsv_file(filepath, &arena);
+            if (!gel) continue;
+
+            Word_t *pv;
+            JSLI(pv, ctx->grammar, (uint8_t *)typekey);
+            *pv = (Word_t)gel;
+        }
+        closedir(sdp);
     }
 
     return 0;
@@ -785,7 +1012,8 @@ int pcfg_merge(const char *dir1, const char *dir2, const char *outdir) {
 
     const char *dirs[] = {
         "Grammar", "Alpha", "Capitalization", "Digits", "Other",
-        "Keyboard", "Years", "Context", "Emails", "Websites", NULL
+        "Keyboard", "Leet", "Dates", "Repeats", "Sem", "Years", "Context",
+        "Emails", "Websites", NULL
     };
 
     ensure_dir(outdir);

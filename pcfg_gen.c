@@ -171,6 +171,40 @@ static void expand_item(GenCtx *ctx, PTNode *nodes, int nnodes,
             expand_item(ctx, nodes, nnodes, node_idx + 1, buf, alpha_start + newlen, w);
             memcpy(buf + alpha_start, w->saved, alpha_bytelen);
         }
+    } else if (type_char == ST_LEET) {
+        /* Leet mask: one symbol per alpha codepoint, '.' = keep the letter,
+         * any other symbol = that literal leet char.  A substitution only
+         * lands where the base letter matches the fold target, so masks
+         * trained on one word degrade gracefully on others. */
+        for (int v = 0; v < ge->nvalues && !gen_done; v++) {
+            char *lmask = ge->values[v];
+            int mlen = strlen(lmask);
+            int alpha_start = bufpos;
+            int cps = 0;
+            while (alpha_start > 0 && cps < mlen) {
+                alpha_start--;
+                while (alpha_start > 0 && ((unsigned char)buf[alpha_start] & 0xC0) == 0x80)
+                    alpha_start--;
+                cps++;
+            }
+            int alpha_bytelen = bufpos - alpha_start;
+            memcpy(w->saved, buf + alpha_start, alpha_bytelen);
+            int ai = 0, mi = 0;
+            while (ai < alpha_bytelen && mi < mlen) {
+                uint32_t cp;
+                int n = utf8_decode(w->saved + ai, alpha_bytelen - ai, &cp);
+                if (n == 0) break;
+                unsigned char lm = (unsigned char)lmask[mi];
+                if (lm != '.' && n == 1 &&
+                    (uint32_t)leet_fold[lm] == utf8_to_lower(cp)) {
+                    buf[alpha_start + ai] = (char)lm;
+                }
+                ai += n;
+                mi++;
+            }
+            expand_item(ctx, nodes, nnodes, node_idx + 1, buf, bufpos, w);
+            memcpy(buf + alpha_start, w->saved, alpha_bytelen);
+        }
     } else if (type_char == ST_MARKOV) {
         return;
     } else {
@@ -240,29 +274,87 @@ static void seed_queue(GenCtx *ctx) {
     fprintf(stderr, "pcfg: queue seeded with %d items\n", ctx->queue.size);
 }
 
-/* ---- Add case mangling ---- */
-static void add_case_mangling(BaseStructure *bases, int nbases) {
-    for (int i = 0; i < nbases; i++) {
-        BaseStructure *bs = &bases[i];
+/* ---- Add case mangling ----
+ * Inserts a C{len} node after each alpha-class node (A or a semantic
+ * category letter) whose Capitalization/{len}.txt exists in the grammar.
+ * Structures whose lengths have no case data keep their node alone rather
+ * than being invalidated at queue seeding. */
+static int type_exists(GenCtx *ctx, const char *type) {
+    Word_t *pv;
+    JSLG(pv, ctx->grammar, (uint8_t *)type);
+    return pv != NULL;
+}
+
+static int is_alpha_class(char c) {
+    return c == ST_ALPHA || SemLetters[(unsigned char)c];
+}
+
+void add_case_mangling(GenCtx *ctx) {
+    for (int i = 0; i < ctx->nbases; i++) {
+        BaseStructure *bs = &ctx->bases[i];
         int n_alpha = 0;
-        for (int j = 0; j < bs->nreplace; j++)
-            if (bs->replacements[j][0] == 'A') n_alpha++;
+        for (int j = 0; j < bs->nreplace; j++) {
+            if (!is_alpha_class(bs->replacements[j][0])) continue;
+            char cbuf[PCFG_MAXTYPE];
+            cbuf[0] = 'C';
+            strcpy(cbuf + 1, bs->replacements[j] + 1);
+            if (type_exists(ctx, cbuf)) n_alpha++;
+        }
         if (n_alpha == 0) continue;
         int new_count = bs->nreplace + n_alpha;
+        if (new_count > MAX_PT_NODES) new_count = MAX_PT_NODES;
         char **new_repl = malloc(new_count * sizeof(char *));
         int k = 0;
-        for (int j = 0; j < bs->nreplace; j++) {
+        for (int j = 0; j < bs->nreplace && k < new_count; j++) {
             new_repl[k++] = bs->replacements[j];
-            if (bs->replacements[j][0] == 'A') {
+            if (is_alpha_class(bs->replacements[j][0])) {
                 char cbuf[PCFG_MAXTYPE];
                 cbuf[0] = 'C';
                 strcpy(cbuf + 1, bs->replacements[j] + 1);
-                new_repl[k++] = strdup(cbuf);
+                if (k < new_count && type_exists(ctx, cbuf))
+                    new_repl[k++] = strdup(cbuf);
             }
         }
         free(bs->replacements);
         bs->replacements = new_repl;
-        bs->nreplace = new_count;
+        bs->nreplace = k;
+    }
+}
+
+/* ---- Add leet mangling ----
+ * Inserts an L{len} node right after each A{len} (so the tree reads
+ * A,L,C), gated on Leet/{len}.txt existing in the grammar.  L and C are
+ * independent reach-back masks over the same alpha value, so the order
+ * between them does not matter. */
+void add_leet_mangling(GenCtx *ctx) {
+    for (int i = 0; i < ctx->nbases; i++) {
+        BaseStructure *bs = &ctx->bases[i];
+        int n_leet = 0;
+        for (int j = 0; j < bs->nreplace; j++) {
+            if (!is_alpha_class(bs->replacements[j][0])) continue;
+            char lbuf[PCFG_MAXTYPE];
+            lbuf[0] = 'L';
+            strcpy(lbuf + 1, bs->replacements[j] + 1);
+            if (type_exists(ctx, lbuf)) n_leet++;
+        }
+        if (n_leet == 0) continue;
+        int new_count = bs->nreplace + n_leet;
+        if (new_count > MAX_PT_NODES) new_count = MAX_PT_NODES;
+        char **new_repl = malloc(new_count * sizeof(char *));
+        int k = 0;
+        for (int j = 0; j < bs->nreplace && k < new_count; j++) {
+            new_repl[k++] = bs->replacements[j];
+            if (is_alpha_class(bs->replacements[j][0])) {
+                char lbuf[PCFG_MAXTYPE];
+                lbuf[0] = 'L';
+                strcpy(lbuf + 1, bs->replacements[j] + 1);
+                if (k < new_count && type_exists(ctx, lbuf))
+                    new_repl[k++] = strdup(lbuf);
+            }
+        }
+        free(bs->replacements);
+        bs->replacements = new_repl;
+        bs->nreplace = k;
     }
 }
 
@@ -297,7 +389,8 @@ int pcfg_generate(const char *grammardir, GenCtx *ctx) {
         return 1;
 
     if (!ctx->skip_case)
-        add_case_mangling(ctx->bases, ctx->nbases);
+        add_case_mangling(ctx);
+    add_leet_mangling(ctx);
     seed_queue(ctx);
 
     Gen = ctx;

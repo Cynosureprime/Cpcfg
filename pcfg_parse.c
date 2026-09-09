@@ -19,11 +19,132 @@
  */
 
 #include "pcfg.h"
+#include <dirent.h>
 
 MultiWordTrie *GlobalMultiTrie = NULL;
 
+static inline unsigned char fast_lower(unsigned char c);
+
+/* ---- Semantic tagging state (-E) and repeated-string flag (-R) ---- */
+Pvoid_t SemMap;                    /* folded word → category letter (0 = fallback corpus) */
+unsigned char SemLetters[256];
+int SemHaveFallback;
+int DetectRepeats;
+
+/* Type letters already used by the grammar; category files may not take them */
+static const char *sem_reserved = "ADOYXKEWCMLBR";
+
+static int cmp_str(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+int sem_load(const char *dir) {
+    DIR *dp = opendir(dir);
+    if (!dp) return -1;
+    struct dirent *ent;
+    int ncats = 0;
+
+    /* Collect and sort filenames: when a word appears in several category
+     * files, the alphabetically first file wins — deterministic and
+     * controllable via file naming. */
+    char **names = NULL;
+    int nnames = 0, capnames = 0;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char *dot = strrchr(ent->d_name, '.');
+        if (!dot || strcmp(dot, ".txt") != 0) continue;
+        if (nnames >= capnames) {
+            capnames = capnames ? capnames * 2 : 32;
+            names = realloc(names, capnames * sizeof(char *));
+            if (!names) { closedir(dp); return -1; }
+        }
+        names[nnames] = strdup(ent->d_name);
+        if (names[nnames]) nnames++;
+    }
+    closedir(dp);
+    qsort(names, nnames, sizeof(char *), cmp_str);
+
+    for (int fi = 0; fi < nnames; fi++) {
+        const char *dname = names[fi];
+        int letter = (unsigned char)dname[0];
+        if (letter == '_') {
+            letter = 0;                    /* fallback corpus for plain A */
+            SemHaveFallback = 1;
+        } else {
+            if (letter < 'A' || letter > 'Z' ||
+                strchr(sem_reserved, letter)) {
+                fprintf(stderr,
+                        "pcfg: semantic file \"%s\": type letter '%c' is reserved\n",
+                        dname, letter);
+                for (int k = 0; k < nnames; k++) free(names[k]);
+                free(names);
+                return -1;
+            }
+            if (!SemLetters[letter]) {
+                SemLetters[letter] = 1;
+                ncats++;
+            }
+        }
+
+        char path[PCFG_MAXPATH];
+        snprintf(path, sizeof(path), "%s/%s", dir, dname);
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+        char line[PCFG_MAXLINE];
+        while (fgets(line, sizeof(line), fp)) {
+            int len = strlen(line);
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+                len--;
+            line[len] = '\0';
+            if (len <= 0) continue;
+            for (int i = 0; i < len; i++)
+                line[i] = (char)fast_lower((unsigned char)line[i]);
+            Word_t *pv;
+            JSLI(pv, SemMap, (uint8_t *)line);
+            *pv = (Word_t)letter;
+        }
+        fclose(fp);
+    }
+    for (int k = 0; k < nnames; k++) free(names[k]);
+    free(names);
+    return ncats;
+}
+
+void sem_free(void) {
+    Word_t bytes;
+    JSLFA(bytes, SemMap);
+    SemMap = NULL;
+    memset(SemLetters, 0, sizeof(SemLetters));
+    SemHaveFallback = 0;
+}
+
+static char sem_lookup(const char *w) {
+    if (!SemMap) return 0;
+    Word_t *pv;
+    JSLG(pv, SemMap, (const uint8_t *)w);
+    /* 0 = fallback corpus entry: known word, but no category tag */
+    return pv ? (char)*pv : 0;
+}
+
+/*
+ * Leet folding table: ASCII char → base letter, 0 = not a leet char.
+ * A leet char is folded into the surrounding alpha run only when it sits
+ * between letters (see the alpha branch in pcfg_parse), so digit runs and
+ * separators are left alone.  The same table drives multiword training and
+ * mask application at generation time.
+ */
+const unsigned char leet_fold[256] = {
+    ['0'] = 'o', ['1'] = 'i', ['3'] = 'e', ['4'] = 'a',
+    ['5'] = 's', ['7'] = 't',
+    ['@'] = 'a', ['$'] = 's', ['!'] = 'i'
+};
+
 static inline unsigned char fast_lower(unsigned char c) {
     return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+static inline int is_leet_char(unsigned char c) {
+    return leet_fold[c] != 0;
 }
 
 /* Context-sensitive patterns (from Go source) — with precomputed lengths */
@@ -156,7 +277,47 @@ void build_base_structure(Section *sects, int nsects, char *out, int outlen) {
 #define TAG_KBD    3
 #define TAG_EMAIL  4
 #define TAG_WEB    5
-#define TAG_KBD1   6   /* first byte of a walk; see phase 1a and phase 2 */
+#define TAG_DATE   6
+#define TAG_REPEAT 7
+#define TAG_KBD1   8   /* first byte of a walk; see phase 1a and phase 2 */
+
+/* ---- Date-shaped digit runs ----
+ * A maximal digit run of exactly 6 or 8 digits is tagged as a date when any
+ * common interpretation is calendar-valid (leap years included):
+ *   8: YYYYMMDD, DDMMYYYY, MMDDYYYY
+ *   6: YYMMDD, DDMMYY, MMDDYY   (YY 00-29 → 20xx, 30-99 → 19xx)
+ */
+static int dim_month(int m, int y) {
+    static const int dim[13] = {0,31,28,31,30,31,30,31,31,30,31,30,31};
+    if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
+    return dim[m];
+}
+
+static int ok_ymd(int y, int m, int d) {
+    return y >= 1900 && y <= 2099 && m >= 1 && m <= 12 &&
+           d >= 1 && d <= dim_month(m, y);
+}
+
+static int dt2(const char *p) { return (p[0] - '0') * 10 + (p[1] - '0'); }
+static int dt4(const char *p) { return dt2(p) * 100 + dt2(p + 2); }
+
+static int is_date_run(const char *s, int n) {
+    if (n == 8) {
+        if (ok_ymd(dt4(s),     dt2(s + 4), dt2(s + 6))) return 1;  /* YYYYMMDD */
+        if (ok_ymd(dt4(s + 4), dt2(s + 2), dt2(s)    )) return 1;  /* DDMMYYYY */
+        if (ok_ymd(dt4(s + 4), dt2(s),     dt2(s + 2))) return 1;  /* MMDDYYYY */
+        return 0;
+    }
+    if (n == 6) {
+        int yy = dt2(s);
+        int y = yy >= 30 ? 1900 + yy : 2000 + yy;
+        if (ok_ymd(y, dt2(s + 2), dt2(s + 4))) return 1;           /* YYMMDD */
+        if (ok_ymd(y, dt2(s + 2), dt2(s)    )) return 1;           /* DDMMYY */
+        if (ok_ymd(y, dt2(s),     dt2(s + 2))) return 1;           /* MMDDYY */
+        return 0;
+    }
+    return 0;
+}
 
 /* Declare keyboard walk detection from pcfg_keyboard.c */
 typedef struct { int start; int len; } KbdWalk;
@@ -367,6 +528,62 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
         }
     }
 
+    /* Phase 1d-2: Date-shaped digit runs (6 or 8 digits) */
+    for (int j = 0; j < pwlen; ) {
+        if (tag[j] != TAG_NONE || pw[j] < '0' || pw[j] > '9') { j++; continue; }
+        int rs = j;
+        int clean = 1;
+        while (j < pwlen && pw[j] >= '0' && pw[j] <= '9') {
+            if (tag[j] != TAG_NONE) clean = 0;
+            j++;
+        }
+        int rl = j - rs;
+        if (clean && (rl == 6 || rl == 8) && is_date_run(pw + rs, rl)) {
+            for (int k = 0; k < rl; k++) tag[rs + k] = TAG_DATE;
+        }
+    }
+
+    /* Phase 1e-2: Repeated strings ("haha", "123123", "qazqazqaz").
+     * Claims digit and alpha runs that are 2+ copies of a unit of 2+
+     * bytes: memcmp(p, p+u, n-u) == 0 means period u. */
+    if (DetectRepeats) {
+        for (int i = 0; i < pwlen; ) {
+            if (tag[i] != TAG_NONE) { i++; continue; }
+            unsigned char c = (unsigned char)pw[i];
+            int cls = 0;
+            if (c >= '0' && c <= '9') cls = 1;
+            else {
+                uint32_t cp0;
+                int n0 = utf8_decode(pw + i, pwlen - i, &cp0);
+                if (n0 > 0 && utf8_is_alpha(cp0)) cls = 2;
+            }
+            if (!cls) { i++; continue; }
+
+            int j = i;
+            while (j < pwlen && tag[j] == TAG_NONE) {
+                if (cls == 1) {
+                    if (pw[j] < '0' || pw[j] > '9') break;
+                    j++;
+                } else {
+                    uint32_t cpj;
+                    int nj = utf8_decode(pw + j, pwlen - j, &cpj);
+                    if (nj == 0 || !utf8_is_alpha(cpj)) break;
+                    j += nj;
+                }
+            }
+            int rn = j - i;
+            if (rn >= 4) {
+                for (int u = 2; u <= rn / 2; u++) {
+                    if (memcmp(pw + i, pw + i + u, rn - u) == 0) {
+                        for (int m = 0; m < rn; m++) tag[i + m] = TAG_REPEAT;
+                        break;
+                    }
+                }
+            }
+            i = j;
+        }
+    }
+
     /* Phase 1e: Context-sensitive patterns */
     for (int p = 0; p < (int)N_CONTEXT_PATS; p++) {
         const char *pat = context_pats[p].pat;
@@ -409,6 +626,16 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
             while (i < pwlen && tag[i] == TAG_KBD) i++;
             set_section(&sects[nsects], &pw[start], i - start, 'K', i - start);
             nsects++;
+        } else if (tag[i] == TAG_DATE) {
+            int start = i;
+            while (i < pwlen && tag[i] == TAG_DATE) i++;
+            set_section(&sects[nsects], &pw[start], i - start, 'B', i - start);
+            nsects++;
+        } else if (tag[i] == TAG_REPEAT) {
+            int start = i;
+            while (i < pwlen && tag[i] == TAG_REPEAT) i++;
+            set_section(&sects[nsects], &pw[start], i - start, 'R', i - start);
+            nsects++;
         } else if (tag[i] == TAG_EMAIL) {
             int start = i;
             while (i < pwlen && tag[i] == TAG_EMAIL) i++;
@@ -426,34 +653,75 @@ int pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
             if (cpn == 0) { i++; continue; }
 
             if (utf8_is_alpha(cp)) {
-                /* Alpha run: advance by full codepoints */
+                /* Alpha run: extends through true letters and leet chars that
+                 * sit between letters.  Trailing leet chars (no letter after
+                 * them) fall through to the digit/other classifiers below. */
                 int start = i;
+                int last_letter_end = 0;
                 while (i < pwlen && tag[i] == TAG_NONE) {
                     int n = utf8_decode(pw + i, pwlen - i, &cp);
-                    if (n == 0 || !utf8_is_alpha(cp)) break;
-                    i += n;
+                    if (n == 0) break;
+                    if (utf8_is_alpha(cp)) {
+                        i += n;
+                        last_letter_end = i;
+                    } else if (n == 1 && is_leet_char((unsigned char)pw[i])) {
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
-                int alen = i - start;
+                int alen = last_letter_end - start;
                 /* tnum = codepoint count for type string (A6 = 6 codepoints) */
                 int cpcount = utf8_cplen(pw + start, alen);
+
+                /* Folded, lowered copy for multiword splitting.  Folding is
+                 * byte-position-preserving (1-byte leet char → 1-byte
+                 * letter), so split lengths map straight back onto pw. */
+                int fl = 0, si2 = start;
+                while (si2 < start + alen) {
+                    uint32_t fcp;
+                    int fn = utf8_decode(pw + si2, start + alen - si2, &fcp);
+                    if (fn == 0) break;
+                    unsigned char fold = (fn == 1)
+                        ? leet_fold[(unsigned char)pw[si2]] : 0;
+                    fl += utf8_encode(lower + fl, fold ? fold : utf8_to_lower(fcp));
+                    si2 += fn;
+                }
+                lower[fl] = '\0';
 
                 /* Try multiword split (byte-level, ASCII only for now) */
                 int parts[16];
                 int nparts = 0;
                 if (GlobalMultiTrie && cpcount >= 8)
-                    nparts = multiword_parse(GlobalMultiTrie, &pw[start], alen, parts, 16);
+                    nparts = multiword_parse(GlobalMultiTrie, lower, fl, parts, 16);
 
                 if (nparts > 1) {
                     int off = start;
                     for (int p = 0; p < nparts && nsects < maxsects - 1; p++) {
                         int pcp = utf8_cplen(pw + off, parts[p]);
-                        set_section(&sects[nsects], &pw[off], parts[p], 'A', pcp);
+                        /* semantic category of the folded part, if tagged */
+                        char pfx = 'A';
+                        if (SemMap && parts[p] < 64) {
+                            char pbuf[64];
+                            memcpy(pbuf, lower + (off - start), parts[p]);
+                            pbuf[parts[p]] = '\0';
+                            char hit = sem_lookup(pbuf);
+                            if (hit) pfx = hit;
+                        }
+                        set_section(&sects[nsects], &pw[off], parts[p], pfx, pcp);
                         nsects++;
                         off += parts[p];
                     }
+                    i = off;
                 } else {
-                    set_section(&sects[nsects], &pw[start], alen, 'A', cpcount);
+                    char pfx = 'A';
+                    if (SemMap) {
+                        char hit = sem_lookup(lower);
+                        if (hit) pfx = hit;
+                    }
+                    set_section(&sects[nsects], &pw[start], alen, pfx, cpcount);
                     nsects++;
+                    i = start + alen;
                 }
             } else if (utf8_is_digit(cp)) {
                 int start = i;

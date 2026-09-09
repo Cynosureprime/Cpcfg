@@ -159,7 +159,6 @@ static int are_you_my_child(GenCtx *ctx, PTNode *child, int nnodes,
  * Uses caller-provided stack buffer to avoid malloc per call.
  * Only allocates (via malloc) for children that pass the pruning check.
  */
-#define MAX_PT_NODES 64
 int find_children(GenCtx *ctx, PTItem *parent, PTItem *children) {
     int nc = 0;
     int nn = parent->nnodes;

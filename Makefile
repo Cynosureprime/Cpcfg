@@ -45,16 +45,20 @@ LIBS = -lJudy -lpthread -lm
 
 OBJS = pcfg.o pcfg_parse.o pcfg_train.o pcfg_save.o pcfg_queue.o \
        pcfg_gen.o pcfg_keyboard.o pcfg_multi.o pcfg_omen.o pcfg_utf8.o \
-       pcfg_ahf.o yarn.o
+       pcfg_ahf.o pcfg_sample.o pcfg_diff.o yarn.o
 
 pcfg: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+# standalone derivation-graph inference tool (no libJudy needed)
+pcfg_infer: pcfg_infer.o
+	$(CC) $(LDFLAGS) -o $@ pcfg_infer.o -lm
 
 %.o: %.c pcfg.h yarn.h
 	$(CC) $(CFLAGS) -c $<
 
 clean:
-	rm -f pcfg $(OBJS)
+	rm -f pcfg pcfg_infer $(OBJS) pcfg_infer.o
 
 .PHONY: clean install install-bin install-man install-tools
 

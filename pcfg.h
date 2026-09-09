@@ -36,6 +36,9 @@
 #define ST_WEBSITE  'W'
 #define ST_CASE     'C'
 #define ST_MARKOV   'M'
+#define ST_LEET     'L'     /* leet substitution mask, applied over A values */
+#define ST_DATE     'B'     /* date-shaped digit run (6 or 8 digits) */
+#define ST_REPEAT   'R'     /* repeated string ("123123", "hahaha") */
 #define ST_UNTYPED  '\0'
 
 /* Parsed password segment */
@@ -123,6 +126,8 @@ typedef struct {
     LenCounters cnt_digits;     /* len → JudySL(value → count) */
     LenCounters cnt_other;      /* len → JudySL(value → count) */
     LenCounters cnt_keyboard;   /* len → JudySL(value → count) */
+    LenCounters cnt_leet;       /* len → JudySL(leet mask → count), '.' = literal */
+    LenCounters cnt_dates;      /* len → JudySL(date digits → count) */
     /* Flat counters */
     Counter cnt_years;          /* JudySL(year → count) */
     Counter cnt_context;        /* JudySL(pattern → count) */
@@ -146,6 +151,11 @@ typedef struct {
     int admit_threshold;        /* admission filter: min count (0=off, default 2) */
     int weighted;               /* -w: input is count:password format */
     int filter_junk;            /* -F: filter junk lines (base64, hex, JSON) */
+    /* Semantic tagging (-E) and smoothing (-s) */
+    Pvoid_t cnt_sem;            /* JudySL: type key ("N4") → Counter(folded word → count) */
+    LenCounters cnt_repeats;    /* len → JudySL(repeated string → count) */
+    char *semdir;               /* -E: category wordlist directory (NULL = off) */
+    double smoothing;           /* -s: corpus mass fraction reserved for unobserved words */
 } TrainCtx;
 
 /* Grammar (for generation) - JudySL mapping type_string → GrammarEntryList* */
@@ -183,6 +193,7 @@ typedef struct {
     char *base_str;             /* PCFG_MAXLINE bytes: base structure string */
     char *mask;                 /* PCFG_MAXLINE bytes: case mask */
     char *lowered;              /* PCFG_MAXLINE bytes: lowered alpha */
+    char *leetmask;             /* PCFG_MAXLINE bytes: leet mask */
     char *decoded;              /* PCFG_MAXLINE bytes: $HEX decode */
     Section *sects;             /* PCFG_MAXSECTIONS: parsed sections */
 } WorkSpace;
@@ -193,6 +204,24 @@ void ws_free(WorkSpace *ws);
 /* pcfg_parse.c - password decomposition */
 typedef struct MultiWordTrie MultiWordTrie;
 extern MultiWordTrie *GlobalMultiTrie;
+
+/* Leet folding: ASCII char → base letter (0 = not a leet char).
+ * Shared by parsing, multiword training and generation. */
+extern const unsigned char leet_fold[256];
+
+/*
+ * Semantic tagging (-E) and repeated-string detection (-R) — opt-in parse
+ * extensions.  Category wordlists are plain files, one word per line,
+ * named {Letter}*.txt (first character = the grammar type letter;
+ * reserved letters: A D O Y X K E W C M L B R).  A file named _*.txt is
+ * the fallback corpus used for smoothing plain-A terminals.
+ */
+extern Pvoid_t SemMap;                /* JudySL: folded word → category letter */
+extern unsigned char SemLetters[256]; /* loaded category letters */
+extern int SemHaveFallback;           /* a _*.txt corpus was loaded */
+extern int DetectRepeats;             /* -R: repeated-string detector */
+int  sem_load(const char *dir);       /* load categories; returns count, -1 on error */
+void sem_free(void);
 int  pcfg_parse(char *pw, int pwlen, Section *sects, int maxsects,
                 unsigned char *tag, char *lower);
 void detect_years(Section *sects, int *nsects);
@@ -205,9 +234,11 @@ void build_case_mask(const char *alpha, int len, char *mask);
 
 /* pcfg_train.c - training */
 int  pcfg_train(const char *infile, const char *outdir, TrainCtx *ctx);
+int64_t parse_weight(char **pw, int *pwlen);
 void counter_inc(Counter *c, const char *key);
 void counter_inc_n(Counter *c, const char *key, int64_t n);
 void lencounter_inc(LenCounters *lc, int len, const char *key);
+void lencounter_inc_n(LenCounters *lc, int len, const char *key, int64_t n);
 void counter_free(Counter *c);
 void lencounter_free(LenCounters *lc);
 
@@ -222,12 +253,22 @@ void    pq_push(PQueue *pq, PTItem *item);
 int     pq_pop(PQueue *pq, PTItem *out);
 int     pq_empty(PQueue *pq);
 void    pq_free(PQueue *pq);
-#define MAX_PT_NODES 64
+#define MAX_PT_NODES (PCFG_MAXSECTIONS * 3)   /* A sections may gain C and L nodes */
 int     find_children(GenCtx *ctx, PTItem *parent, PTItem *children);
 double  find_prob(GenCtx *ctx, PTNode *nodes, int nnodes, double base_prob);
 
 /* pcfg_gen.c - guess generation */
 int  pcfg_generate(const char *ruledir, GenCtx *ctx);
+void add_case_mangling(GenCtx *ctx);
+void add_leet_mangling(GenCtx *ctx);
+
+/* pcfg_sample.c - temperature-controlled sampling */
+int  pcfg_sample_generate(const char *gramdir, GenCtx *ctx,
+                          int64_t count, double temp);
+
+/* pcfg_diff.c - coverage gap diagnosis */
+int  pcfg_diagnose(const char *gramdir, const char *infile,
+                   int weighted, int skip_masks, const char *outfile);
 
 /* pcfg_ahf.c - adaptive hybrid-fuzzing generation */
 int  pcfg_ahf_generate(const char *gramdir, GenCtx *ctx, int64_t count);
@@ -263,6 +304,7 @@ void print_mem(const char *label);
 MultiWordTrie *multiword_new(int threshold, int min_len, int max_len);
 void  multiword_free(MultiWordTrie *mw);
 void  multiword_train(MultiWordTrie *mw, const char *pw, int pwlen);
+void  multiword_train_n(MultiWordTrie *mw, const char *pw, int pwlen, int64_t n);
 int   multiword_parse(MultiWordTrie *mw, const char *alpha, int alen,
                       int *parts, int max_parts);
 
@@ -271,6 +313,7 @@ typedef struct OmenTrainer OmenTrainer;
 OmenTrainer *omen_new(int ngram, int alphabet_size);
 void omen_build_alphabet(OmenTrainer *ot, Counter char_freq);
 void omen_train(OmenTrainer *ot, const char *pw, int pwlen);
+void omen_train_n(OmenTrainer *ot, const char *pw, int pwlen, int64_t n);
 void omen_smooth(OmenTrainer *ot);
 int  omen_save(OmenTrainer *ot, const char *omen_dir);
 void omen_free(OmenTrainer *ot);

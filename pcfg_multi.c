@@ -20,7 +20,7 @@
 
 typedef struct TrieNode {
     struct TrieNode *children[TRIE_CHILDREN];
-    int count;
+    int64_t count;
     int has_count;
 } TrieNode;
 
@@ -71,51 +71,90 @@ void multiword_free(MultiWordTrie *mw) {
 }
 
 /* Train: add word runs from a password to the trie.
- * Trie keys are lowered UTF-8 byte sequences.
- * run_len counts codepoints for min/max length checks. */
-void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
-    TrieNode *cur = mw->root;
-    int run_len = 0;  /* codepoint count */
+ * Trie keys are lowered UTF-8 byte sequences with leet chars folded to
+ * their base letters, matching pcfg_parse's alpha handling.  Runs are
+ * trimmed so they start and end with a true letter: a leet char only
+ * belongs to a word when it sits between letters.
+ * main thread only — the static run buffer needs no locking. */
+void multiword_train_n(MultiWordTrie *mw, const char *pw, int pwlen, int64_t n) {
+    static char runbuf[PCFG_MAXLINE];
+    int runlen = 0;          /* bytes buffered for the current run */
+    int first_letter = -1;   /* byte offset of first true letter, -1 = none */
+    int last_letter_end = 0; /* byte offset just past the last true letter */
 
     int i = 0;
     while (i <= pwlen) {
         uint32_t cp = 0;
         int cpn = 0;
-        if (i < pwlen) {
+        int at_end = (i >= pwlen);
+        if (!at_end) {
             cpn = utf8_decode(pw + i, pwlen - i, &cp);
             if (cpn == 0) { i++; continue; }
         }
 
-        if (i < pwlen && utf8_is_alpha(cp)) {
-            /* Insert lowered UTF-8 bytes into trie */
-            uint32_t lcp = utf8_to_lower(cp);
-            char enc[4];
-            int elen = utf8_encode_width(enc, lcp, cpn);
-            for (int b = 0; b < elen; b++) {
-                unsigned char c = (unsigned char)enc[b];
-                if (c < TRIE_CHILDREN) {
-                    if (!cur->children[c])
-                        cur->children[c] = trie_new_node();
-                    cur = cur->children[c];
+        int is_letter = !at_end && utf8_is_alpha(cp);
+        int is_leet = !at_end && !is_letter && cpn == 1 &&
+                      leet_fold[(unsigned char)pw[i]] != 0;
+
+        if (is_letter || is_leet) {
+            if (runlen + cpn < PCFG_MAXLINE) {
+                memcpy(runbuf + runlen, pw + i, cpn);
+                if (is_letter) {
+                    if (first_letter < 0) first_letter = runlen;
+                    last_letter_end = runlen + cpn;
                 }
+                runlen += cpn;
             }
-            run_len++;
             i += cpn;
         } else {
-            /* End of letter run (non-alpha or end of string) */
-            if (run_len >= mw->min_len && run_len <= mw->max_len) {
-                if (!cur->has_count) {
-                    cur->count = 1;
-                    cur->has_count = 1;
-                } else {
-                    cur->count++;
+            /* Run ended — insert the trimmed [first_letter, last_letter_end)
+             * region, lowered and folded. */
+            if (first_letter >= 0 && last_letter_end - first_letter > 0) {
+                int len = last_letter_end - first_letter;
+                TrieNode *cur = mw->root;
+                int si = first_letter;
+                int word_cps = 0;
+                while (si < first_letter + len) {
+                    uint32_t c2;
+                    int n2 = utf8_decode(runbuf + si, first_letter + len - si, &c2);
+                    if (n2 == 0) break;
+                    uint32_t lcp = (n2 == 1 && leet_fold[(unsigned char)runbuf[si]])
+                                   ? leet_fold[(unsigned char)runbuf[si]]
+                                   : utf8_to_lower(c2);
+                    char enc[4];
+                    int elen = utf8_encode_width(enc, lcp, n2);
+                    for (int b = 0; b < elen; b++) {
+                        unsigned char c = (unsigned char)enc[b];
+                        if (c < TRIE_CHILDREN) {
+                            if (!cur->children[c])
+                                cur->children[c] = trie_new_node();
+                            cur = cur->children[c];
+                        }
+                    }
+                    si += n2;
+                    word_cps++;
+                }
+                if (cur != mw->root &&
+                    word_cps >= mw->min_len && word_cps <= mw->max_len) {
+                    if (!cur->has_count) {
+                        cur->count = n;
+                        cur->has_count = 1;
+                    } else {
+                        cur->count += n;
+                    }
                 }
             }
-            cur = mw->root;
-            run_len = 0;
-            if (i < pwlen) i += cpn; else i++;
+            runlen = 0;
+            first_letter = -1;
+            last_letter_end = 0;
+            if (at_end) i++;
+            else i += cpn;
         }
     }
+}
+
+void multiword_train(MultiWordTrie *mw, const char *pw, int pwlen) {
+    multiword_train_n(mw, pw, pwlen, 1);
 }
 
 /* Get count for a word in the trie */
